@@ -68,16 +68,16 @@ impl NativeSecretVault {
     #[cfg(target_os = "windows")]
     pub fn protect_secret(plaintext: &str) -> Result<Vec<u8>, String> {
         use windows_sys::Win32::Security::Cryptography::{
-            CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, DATA_BLOB,
+            CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
         };
         use std::ptr::null_mut;
 
         let bytes = plaintext.as_bytes();
-        let mut data_in = DATA_BLOB {
+        let mut data_in = CRYPT_INTEGER_BLOB {
             cbData: bytes.len() as u32,
             pbData: bytes.as_ptr() as *mut u8,
         };
-        let mut data_out = DATA_BLOB {
+        let mut data_out = CRYPT_INTEGER_BLOB {
             cbData: 0,
             pbData: null_mut(),
         };
@@ -105,15 +105,15 @@ impl NativeSecretVault {
     #[cfg(target_os = "windows")]
     pub fn unprotect_secret(ciphertext: &[u8]) -> Result<String, String> {
         use windows_sys::Win32::Security::Cryptography::{
-            CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, DATA_BLOB,
+            CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
         };
         use std::ptr::null_mut;
 
-        let mut data_in = DATA_BLOB {
+        let mut data_in = CRYPT_INTEGER_BLOB {
             cbData: ciphertext.len() as u32,
             pbData: ciphertext.as_ptr() as *mut u8,
         };
-        let mut data_out = DATA_BLOB {
+        let mut data_out = CRYPT_INTEGER_BLOB {
             cbData: 0,
             pbData: null_mut(),
         };
