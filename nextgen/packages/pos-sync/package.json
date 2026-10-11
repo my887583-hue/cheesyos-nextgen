@@ -16,6 +16,7 @@
   "dependencies": {
     "@cheesyos/nextgen-shared": "file:../shared",
     "@cheesyos/pos-core": "file:../pos-core",
-    "@cheesyos/pos-local": "file:../pos-local"
+    "@cheesyos/pos-local": "file:../pos-local",
+    "@supabase/supabase-js": "^2.49.1"
   }
 }

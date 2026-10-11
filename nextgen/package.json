@@ -1,0 +1,8 @@
+{
+  "name": "cheesyos-nextgen-workspace",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "windows-pos"
+  ]
+}
