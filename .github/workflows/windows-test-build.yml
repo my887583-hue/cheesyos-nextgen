@@ -37,7 +37,17 @@ jobs:
 
       - name: Install Frontend Dependencies
         working-directory: nextgen
-        run: npm install
+        run: npm install --include=optional
+
+      - name: Verify Windows Native Binding
+        shell: pwsh
+        run: |
+          $found = Get-ChildItem -Path "nextgen" -Filter "*rolldown-binding.win32-x64-msvc.node*" -Recurse -ErrorAction SilentlyContinue
+          if ($found) {
+            Write-Host "WINDOWS_ROLLDOWN_BINDING_PRESENT=YES"
+          } else {
+            Write-Host "WINDOWS_ROLLDOWN_BINDING_PRESENT=NO"
+          }
 
       - name: Build Frontend Application
         working-directory: nextgen/windows-pos
