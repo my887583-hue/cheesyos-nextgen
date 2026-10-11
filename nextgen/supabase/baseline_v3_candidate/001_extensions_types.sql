@@ -1,0 +1,5 @@
+-- CHEESYOS NEXTGEN BASELINE V3 CANDIDATE: EXTENSIONS & TYPES
+-- Target Project: sdbnibyzqtgpbexlznat
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA extensions;
+

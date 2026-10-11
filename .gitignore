@@ -1,0 +1,49 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Staging environment (added by staging setup -- never commit real secrets)
+.env.staging
+.env.staging.local
+
+# Environments and secrets
+.env
+.env.*
+!.env.example
+!**/.env.example
+!**/.env.nextgen.example
+
+# Dependencies and build targets
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+target/
+**/target/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+

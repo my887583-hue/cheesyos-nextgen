@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": true,
+    "declarationMap": true,
+    "baseUrl": ".",
+    "paths": {
+      "@cheesyos/nextgen-shared": ["../shared/src/index.ts"],
+      "@cheesyos/pos-core": ["../pos-core/src/index.ts"],
+      "@cheesyos/pos-local": ["../pos-local/src/index.ts"]
+    },
+    "types": ["node"]
+  },
+  "include": ["src/**/*", "tests/**/*"]
+}
