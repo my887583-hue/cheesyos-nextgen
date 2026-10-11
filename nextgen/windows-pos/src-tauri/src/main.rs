@@ -6,16 +6,27 @@ pub mod transport;
 
 use std::sync::Mutex;
 use rusqlite::Connection;
+use tauri::Manager;
 
 pub struct DbState(pub Mutex<Option<Connection>>);
 
+pub fn open_persistent_pos_db(db_path: &std::path::Path) -> Result<Connection, String> {
+    let conn = db::open_database_at_path(db_path)?;
+    transport::init_credentials_table(&conn).map_err(|e| format!("INIT_CREDENTIALS_FAILED: {}", e))?;
+    Ok(conn)
+}
+
 #[tauri::command]
-fn init_db_schema(state: tauri::State<DbState>) -> Result<String, String> {
+fn init_db_schema(app: tauri::AppHandle, state: tauri::State<DbState>) -> Result<String, String> {
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
     if guard.is_none() {
-        let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
-        db::init_database(&conn).map_err(|e| e.to_string())?;
-        transport::init_credentials_table(&conn).map_err(|e| e.to_string())?;
+        let base_dir = app
+            .path()
+            .app_local_data_dir()
+            .or_else(|_| app.path().app_data_dir())
+            .map_err(|e| format!("APP_LOCAL_DATA_DIR_ERROR: {}", e))?;
+        let db_path = base_dir.join("pos.db");
+        let conn = open_persistent_pos_db(&db_path)?;
         *guard = Some(conn);
     } else if let Some(conn) = guard.as_ref() {
         db::init_database(conn).map_err(|e| e.to_string())?;
@@ -49,6 +60,10 @@ async fn native_pos_rpc(
     state: tauri::State<'_, DbState>,
     req: transport::NativeRpcRequest,
 ) -> Result<transport::NativeRpcResponse, transport::NativeRpcError> {
+    let url = transport::get_nextgen_supabase_url().map_err(|e| transport::NativeRpcError {
+        code: "CONFIG_ERROR".to_string(),
+        message: e.to_string(),
+    })?;
     let call = {
         let guard = state.0.lock().map_err(|e| transport::NativeRpcError {
             code: "RETRYABLE".to_string(),
@@ -58,10 +73,10 @@ async fn native_pos_rpc(
             code: "RETRYABLE".to_string(),
             message: "DB_NOT_INITIALIZED".to_string(),
         })?;
-        transport::prepare_rpc_call(conn, &req, transport::NEXTGEN_SUPABASE_PROJECT_URL)?
+        transport::prepare_rpc_call(conn, &req, url)?
     };
 
-    let dispatcher = transport::NativeRpcDispatcher::default();
+    let dispatcher = transport::NativeRpcDispatcher::try_default()?;
     dispatcher.send_rpc(call).await
 }
 
@@ -72,14 +87,17 @@ async fn native_provision_device(
     device_name: String,
     admin_token: String,
 ) -> Result<serde_json::Value, String> {
+    let base_url = transport::get_nextgen_supabase_url().map_err(|e| e.to_string())?;
+    let anon_key = transport::get_nextgen_supabase_anon_key().map_err(|e| e.to_string())?;
+
     let client = reqwest::Client::new();
-    let url = format!("{}/rest/v1/rpc/secure_provision_pos_device", transport::NEXTGEN_SUPABASE_PROJECT_URL);
+    let url = format!("{}/rest/v1/rpc/secure_provision_pos_device", base_url);
     let body = serde_json::json!({
         "p_terminal_code": terminal_code,
         "p_device_name": device_name,
     });
     let resp = client.post(&url)
-        .header("apikey", transport::NEXTGEN_SUPABASE_ANON_KEY)
+        .header("apikey", anon_key)
         .header("Authorization", format!("Bearer {}", admin_token))
         .header("Content-Type", "application/json")
         .json(&body)

@@ -629,6 +629,17 @@ pub fn format_bill_number(terminal_code: &str, sequence_number: i64) -> String {
 
 // --- Core Database Engine API ---
 
+pub fn open_database_at_path(db_path: &std::path::Path) -> Result<Connection, String> {
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("CREATE_DIR_FAILED: {}", e))?;
+    }
+    let conn = Connection::open(db_path)
+        .map_err(|e| format!("DB_OPEN_FAILED: {}", e))?;
+    init_database(&conn).map_err(|e| format!("INIT_DB_FAILED: {}", e))?;
+    Ok(conn)
+}
+
 pub fn init_database(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
     conn.execute_batch(INITIAL_SCHEMA_SQL)?;

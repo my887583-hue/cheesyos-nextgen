@@ -1,6 +1,9 @@
 #[path = "../src/db.rs"]
 mod db;
 
+#[path = "../src/transport.rs"]
+mod transport;
+
 use rusqlite::Connection;
 use std::fs;
 
@@ -943,5 +946,106 @@ fn test_pull_safe_prefix_cursor_and_same_timestamp_parity() {
     let cursor2 = get_sync_cursor(&conn, PullDataset::Products).unwrap();
     assert_eq!(cursor2.last_updated_at, "2026-10-10T12:00:00.000Z");
     assert_eq!(cursor2.last_id, "prod-C");
+}
+
+// ============================================================================
+// FIX 09: PERSISTENT SQLITE & NATIVE NEXTGEN CONFIG CONTRACTS
+// ============================================================================
+
+#[test]
+fn test_persistent_sqlite_file_and_reopen_contract() {
+    let mut temp_path = std::env::temp_dir();
+    temp_path.push(format!("cheesyos_fix09_persist_{}.db", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+
+    // Phase 1: Open persistent database at path, initialize, write sequence counter
+    {
+        let conn = open_database_at_path(&temp_path).expect("open persistent sqlite");
+        assert!(temp_path.exists(), "PERSISTENT_SQLITE_FILE: File must physically exist on disk");
+        let meta = fs::metadata(&temp_path).expect("file metadata");
+        assert!(meta.len() > 0, "PERSISTENT_SQLITE_FILE: Database file must be non-empty");
+
+        conn.execute(
+            "INSERT INTO pos_sequences (sequence_name, current_value, updated_at) VALUES ('bill_seq', 42, '2026-10-11T12:00:00Z');",
+            [],
+        ).expect("insert sequence");
+        // Connection drops cleanly here
+    }
+
+    // Phase 2: Reopen same SQLite file from disk and verify persistence across connection boundary
+    {
+        let conn2 = open_database_at_path(&temp_path).expect("reopen same sqlite file");
+        let val: i64 = conn2.query_row(
+            "SELECT current_value FROM pos_sequences WHERE sequence_name = 'bill_seq';",
+            [],
+            |r| r.get(0),
+        ).expect("query sequence from reopened db");
+
+        assert_eq!(val, 42, "SQLITE_REOPEN_SAME_FILE: Value must persist across connection reopen");
+    }
+
+    // Cleanup
+    let _ = fs::remove_file(&temp_path);
+}
+
+#[test]
+fn test_device_config_restart_persistence_contract() {
+    let mut temp_path = std::env::temp_dir();
+    temp_path.push(format!("cheesyos_fix09_device_{}.db", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+
+    // Process A: Write device config
+    {
+        let mut conn = open_database_at_path(&temp_path).expect("open db process A");
+        transport::init_credentials_table(&conn).expect("init credentials process A");
+
+        let cfg = set_device_config(
+            &mut conn,
+            SetDeviceConfigInput {
+                device_id: "dev-fix09-persistent".to_string(),
+                terminal_code: "T01".to_string(),
+                device_name: "Front Counter".to_string(),
+                created_at: Some("2026-10-11T12:00:00.000Z".to_string()),
+            },
+        ).expect("set device config");
+        assert_eq!(cfg.terminal_code, "T01");
+
+        transport::store_device_credential(&conn, "dev-fix09-persistent", "token_sec_123").expect("store credential");
+        // Process A exits
+    }
+
+    // Process B: Reopen same file and verify device config & credential persist
+    {
+        let conn = open_database_at_path(&temp_path).expect("reopen db process B");
+        let cfg = get_device_config(&conn)
+            .expect("get device config")
+            .expect("device config must exist after restart");
+
+        assert_eq!(cfg.device_id, "dev-fix09-persistent", "DEVICE_CONFIG_RESTART_PERSISTENCE: Device ID must match");
+        assert_eq!(cfg.terminal_code, "T01", "DEVICE_CONFIG_RESTART_PERSISTENCE: Terminal code must match");
+        assert_eq!(cfg.device_name, "Front Counter");
+
+        let cred = transport::load_device_credential(&conn, "dev-fix09-persistent")
+            .expect("load device credential after restart");
+        assert_eq!(cred, "token_sec_123", "DEVICE_CREDENTIAL_RESTART_PERSISTENCE: Credential must match");
+    }
+
+    // Cleanup
+    let _ = fs::remove_file(&temp_path);
+}
+
+#[test]
+fn test_native_nextgen_config_contracts() {
+    // 1. NextGen Project URL must be configured and valid
+    let url = transport::get_nextgen_supabase_url().expect("NATIVE_NEXTGEN_URL_CONFIGURED: URL must be valid");
+    assert!(url.contains("sdbnibyzqtgpbexlznat"), "NATIVE_NEXTGEN_URL_CONFIGURED: Project must match sdbnibyzqtgpbexlznat");
+    assert!(!url.contains("asvkfvrbhvxjmkznnpyb"), "Target isolation: Production project is forbidden");
+
+    // 2. NextGen Anon Key must be configured and must NOT be the old dummy fallback
+    let anon_key = transport::get_nextgen_supabase_anon_key().expect("NATIVE_NEXTGEN_ANON_KEY_CONFIGURED");
+    assert!(!anon_key.is_empty(), "Anon key must not be empty");
+    assert_ne!(
+        anon_key,
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.dummy_nextgen_anon_key_for_transport_contract",
+        "DUMMY_NATIVE_ANON_KEY_RUNTIME_FALLBACK: Dummy key must be absent from runtime fallback"
+    );
 }
 

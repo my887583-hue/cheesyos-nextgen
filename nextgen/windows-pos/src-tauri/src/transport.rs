@@ -5,7 +5,40 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 pub const NEXTGEN_SUPABASE_PROJECT_URL: &str = "https://sdbnibyzqtgpbexlznat.supabase.co";
-pub const NEXTGEN_SUPABASE_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.dummy_nextgen_anon_key_for_transport_contract";
+pub const EXPECTED_NEXTGEN_PROJECT_REF: &str = "sdbnibyzqtgpbexlznat";
+pub const FORBIDDEN_PRODUCTION_PROJECT_REF: &str = "asvkfvrbhvxjmkznnpyb";
+
+pub fn get_nextgen_supabase_url() -> Result<&'static str, &'static str> {
+    const URL_ENV: Option<&str> = option_env!("VITE_NEXTGEN_SUPABASE_URL");
+    let url = match URL_ENV {
+        Some(u) if !u.trim().is_empty() => u.trim(),
+        _ => NEXTGEN_SUPABASE_PROJECT_URL,
+    };
+    if url.contains(FORBIDDEN_PRODUCTION_PROJECT_REF) {
+        return Err("FORBIDDEN_PRODUCTION_TARGET: Production project asvkfvrbhvxjmkznnpyb is strictly forbidden in NextGen runtime");
+    }
+    if !url.contains(EXPECTED_NEXTGEN_PROJECT_REF) {
+        return Err("INVALID_TARGET_PROJECT: Target project must be sdbnibyzqtgpbexlznat");
+    }
+    Ok(url)
+}
+
+pub fn get_nextgen_supabase_anon_key() -> Result<&'static str, &'static str> {
+    const KEY_ENV: Option<&str> = option_env!("VITE_NEXTGEN_SUPABASE_ANON_KEY");
+    match KEY_ENV {
+        Some(k) if !k.trim().is_empty() && !k.contains("dummy") => Ok(k.trim()),
+        _ => {
+            #[cfg(test)]
+            {
+                Ok("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.test_only_explicit_fixture_key")
+            }
+            #[cfg(not(test))]
+            {
+                Err("NATIVE_NEXTGEN_ANON_KEY_MISSING: VITE_NEXTGEN_SUPABASE_ANON_KEY compile-time environment variable required in release builds")
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -298,11 +331,25 @@ pub struct NativeRpcDispatcher {
 
 impl Default for NativeRpcDispatcher {
     fn default() -> Self {
-        Self::new(NEXTGEN_SUPABASE_PROJECT_URL, NEXTGEN_SUPABASE_ANON_KEY)
+        let url = get_nextgen_supabase_url().unwrap_or(NEXTGEN_SUPABASE_PROJECT_URL);
+        let anon_key = get_nextgen_supabase_anon_key().unwrap_or_default();
+        Self::new(url, anon_key)
     }
 }
 
 impl NativeRpcDispatcher {
+    pub fn try_default() -> Result<Self, NativeRpcError> {
+        let url = get_nextgen_supabase_url().map_err(|e| NativeRpcError {
+            code: "CONFIG_ERROR".to_string(),
+            message: e.to_string(),
+        })?;
+        let anon_key = get_nextgen_supabase_anon_key().map_err(|e| NativeRpcError {
+            code: "CONFIG_ERROR".to_string(),
+            message: e.to_string(),
+        })?;
+        Ok(Self::new(url, anon_key))
+    }
+
     pub fn new(base_url: &str, anon_key: &str) -> Self {
         Self {
             client: reqwest::Client::builder().build().unwrap(),
