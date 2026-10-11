@@ -49,8 +49,28 @@ jobs:
             Write-Host "WINDOWS_ROLLDOWN_BINDING_PRESENT=NO"
           }
 
+      - name: Verify NextGen Supabase Config Presence
+        shell: pwsh
+        env:
+          VITE_NEXTGEN_SUPABASE_URL: ${{ secrets.VITE_NEXTGEN_SUPABASE_URL }}
+          VITE_NEXTGEN_SUPABASE_ANON_KEY: ${{ secrets.VITE_NEXTGEN_SUPABASE_ANON_KEY }}
+        run: |
+          if ($env:VITE_NEXTGEN_SUPABASE_URL) {
+            Write-Host "NEXTGEN_SUPABASE_URL_PRESENT=YES"
+          } else {
+            Write-Host "NEXTGEN_SUPABASE_URL_PRESENT=NO"
+          }
+          if ($env:VITE_NEXTGEN_SUPABASE_ANON_KEY) {
+            Write-Host "NEXTGEN_SUPABASE_ANON_KEY_PRESENT=YES"
+          } else {
+            Write-Host "NEXTGEN_SUPABASE_ANON_KEY_PRESENT=NO"
+          }
+
       - name: Build Frontend Application
         working-directory: nextgen/windows-pos
+        env:
+          VITE_NEXTGEN_SUPABASE_URL: ${{ secrets.VITE_NEXTGEN_SUPABASE_URL }}
+          VITE_NEXTGEN_SUPABASE_ANON_KEY: ${{ secrets.VITE_NEXTGEN_SUPABASE_ANON_KEY }}
         run: npm run build
 
       - name: Run Windows Native Rust Unit Tests
@@ -61,6 +81,9 @@ jobs:
 
       - name: Build Tauri Package (Unsigned Internal Test Build)
         working-directory: nextgen/windows-pos
+        env:
+          VITE_NEXTGEN_SUPABASE_URL: ${{ secrets.VITE_NEXTGEN_SUPABASE_URL }}
+          VITE_NEXTGEN_SUPABASE_ANON_KEY: ${{ secrets.VITE_NEXTGEN_SUPABASE_ANON_KEY }}
         run: npx --yes @tauri-apps/cli build --no-sign
 
       - name: Upload Windows 11 Test Build Artifacts
