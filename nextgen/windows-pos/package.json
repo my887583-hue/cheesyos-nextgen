@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "npx tsx --test tests/tauri_adapter_integration.test.ts tests/runtime_lifecycle.test.ts tests/tauri_push_transport.test.ts"
+    "test": "npx tsx --test tests/tauri_adapter_integration.test.ts tests/runtime_lifecycle.test.ts tests/tauri_push_transport.test.ts tests/staff_auth_provisioning.test.ts"
   },
   "dependencies": {
     "@cheesyos/nextgen-shared": "file:../packages/shared",
