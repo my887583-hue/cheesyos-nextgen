@@ -36,7 +36,7 @@ function createMockSupabaseClient(options?: {
 }) {
   const user = options?.user ?? { id: 'usr-admin-1', email: 'admin@cheesybites.in' };
   const session = options?.session ?? { access_token: 'valid.admin.jwt.token' };
-  const profile = options?.profile ?? {
+  const profile = options && 'profile' in options ? options.profile : {
     id: 'usr-admin-1',
     full_name: 'Store Owner',
     role: 'owner',
@@ -311,4 +311,33 @@ describe('CHEESYOS NEXTGEN WINDOWS POS — STAFF AUTH & DEVICE PROVISIONING (TAS
 
     assert.deepEqual(calls, ['native_provision_device'], 'Must reuse exact native_provision_device Tauri command');
   });
+
+  it('9. PROFILE_DB_ERROR_NOT_MAPPED_TO_NOT_FOUND: PostgREST database error returns STAFF_PROFILE_QUERY_FAILED instead of STAFF_PROFILE_NOT_FOUND', async () => {
+    const dbErrClient = createMockSupabaseClient({
+      profileError: { code: '42P17', message: 'infinite recursion detected in policy for relation "staff_profiles"' },
+    });
+    await bootstrapPosHost({ supabaseClient: dbErrClient });
+
+    const result = await signInStaff('admin@cheesybites.in', 'Secret123!');
+
+    assert.equal(result.success, false);
+    assert.equal(result.errorCode, 'STAFF_PROFILE_QUERY_FAILED');
+    assert.ok(result.errorMessage?.includes('42P17'), 'Sanitized error message must include error code');
+    assert.equal(isStaffAuthSessionReady(), false);
+  });
+
+  it('10. ACTUAL_MISSING_PROFILE_MAPS_TO_NOT_FOUND: Genuinely missing profile record returns STAFF_PROFILE_NOT_FOUND', async () => {
+    const missingClient = createMockSupabaseClient({
+      profile: null,
+    });
+    await bootstrapPosHost({ supabaseClient: missingClient });
+
+    const result = await signInStaff('admin@cheesybites.in', 'Secret123!');
+
+    assert.equal(result.success, false);
+    assert.equal(result.errorCode, 'STAFF_PROFILE_NOT_FOUND');
+    assert.equal(result.errorMessage, 'Staff profile record not found for this account.');
+    assert.equal(isStaffAuthSessionReady(), false);
+  });
 });
+

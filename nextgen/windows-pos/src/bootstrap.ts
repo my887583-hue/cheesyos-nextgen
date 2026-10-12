@@ -49,6 +49,7 @@ export interface StaffAuthSession {
 export type StaffSignInErrorCode =
   | 'INVALID_CREDENTIALS'
   | 'STAFF_PROFILE_NOT_FOUND'
+  | 'STAFF_PROFILE_QUERY_FAILED'
   | 'ACCOUNT_INACTIVE'
   | 'POS_ACCESS_DENIED'
   | 'NETWORK_ERROR'
@@ -121,7 +122,22 @@ export async function signInStaff(email: string, password: string): Promise<Staf
       .eq('id', authData.user.id)
       .single();
 
-    if (profileError || !profile) {
+    if (profileError) {
+      await supabaseClientInstance.auth.signOut().catch(() => {});
+      const rawCode = typeof profileError === 'object' && profileError !== null && 'code' in profileError
+        ? String(profileError.code)
+        : '';
+      const sanitizedCode = rawCode.replace(/[^a-zA-Z0-9_-]/g, '');
+      return {
+        success: false,
+        errorCode: 'STAFF_PROFILE_QUERY_FAILED',
+        errorMessage: sanitizedCode
+          ? `Staff profile query failed (${sanitizedCode}).`
+          : 'Staff profile query failed.',
+      };
+    }
+
+    if (!profile) {
       await supabaseClientInstance.auth.signOut().catch(() => {});
       return {
         success: false,
