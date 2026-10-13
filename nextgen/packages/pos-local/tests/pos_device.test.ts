@@ -20,6 +20,7 @@ import {
   formatBillNumber,
   allocateNextBillNumber,
   getPendingOutboxEntries,
+  SCHEMA_VERSION,
 } from '../src/index.js';
 
 describe('Phase 3F.1 — Device Identity & Offline Bill Numbering', () => {
@@ -231,7 +232,7 @@ describe('Phase 3F.1 — Device Identity & Offline Bill Numbering', () => {
 
       // Step B: Open with PosLocalDatabase (should detect v1 and migrate to v2)
       const dbManager = new PosLocalDatabase(dbPath);
-      assert.equal(dbManager.getSchemaVersion(), 2);
+      assert.equal(dbManager.getSchemaVersion(), SCHEMA_VERSION);
 
       // Verify new tables pos_device_config and pos_sequences exist and function
       setLocalDeviceConfig(dbManager, {

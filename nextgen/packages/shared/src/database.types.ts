@@ -224,6 +224,7 @@ export interface Database {
           delivery_charge: number;
           grand_total: number;
           device_id: string | null;
+          version: number;
           created_at: string;
           updated_at: string;
         };
@@ -241,6 +242,7 @@ export interface Database {
           delivery_charge?: number;
           grand_total?: number;
           device_id?: string | null;
+          version?: number;
           created_at?: string;
           updated_at?: string;
         };
@@ -258,6 +260,7 @@ export interface Database {
           delivery_charge?: number;
           grand_total?: number;
           device_id?: string | null;
+          version?: number;
           created_at?: string;
           updated_at?: string;
         };
@@ -461,6 +464,7 @@ export interface Database {
         Row: {
           id: string;
           kot_id: string;
+          order_item_id: string | null;
           product_id: string;
           variant_id: string | null;
           product_name: string;
@@ -470,6 +474,7 @@ export interface Database {
         Insert: {
           id?: string;
           kot_id: string;
+          order_item_id?: string | null;
           product_id: string;
           variant_id?: string | null;
           product_name: string;
@@ -479,6 +484,7 @@ export interface Database {
         Update: {
           id?: string;
           kot_id?: string;
+          order_item_id?: string | null;
           product_id?: string;
           variant_id?: string | null;
           product_name?: string;
@@ -515,6 +521,8 @@ export interface Database {
           id: string;
           order_id: string;
           kot_id: string | null;
+          kot_item_id: string | null;
+          order_item_id: string | null;
           product_name: string;
           cancelled_qty: number;
           reason: string;
@@ -525,6 +533,8 @@ export interface Database {
           id?: string;
           order_id: string;
           kot_id?: string | null;
+          kot_item_id?: string | null;
+          order_item_id?: string | null;
           product_name: string;
           cancelled_qty: number;
           reason: string;
@@ -535,6 +545,8 @@ export interface Database {
           id?: string;
           order_id?: string;
           kot_id?: string | null;
+          kot_item_id?: string | null;
+          order_item_id?: string | null;
           product_name?: string;
           cancelled_qty?: number;
           reason?: string;
@@ -1013,6 +1025,33 @@ export interface Database {
       secure_sync_pos_payment: {
         Args: {
           p_payment: Record<string, unknown>;
+        };
+        Returns: boolean;
+      };
+      secure_sync_pos_table_session: {
+        Args: {
+          p_session: Record<string, unknown>;
+          p_device_id?: string;
+          p_device_token?: string;
+        };
+        Returns: boolean;
+      };
+      secure_replace_pos_draft_order: {
+        Args: {
+          p_order: Record<string, unknown>;
+          p_order_items: Array<Record<string, unknown>>;
+          p_device_id?: string;
+          p_device_token?: string;
+        };
+        Returns: boolean;
+      };
+      secure_save_kot_correction: {
+        Args: {
+          p_correction: Record<string, unknown>;
+          p_updated_order_item: Record<string, unknown>;
+          p_updated_order: Record<string, unknown>;
+          p_device_id?: string;
+          p_device_token?: string;
         };
         Returns: boolean;
       };

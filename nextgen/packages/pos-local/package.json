@@ -11,7 +11,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "npx tsx --test tests/pos_local.test.ts tests/pos_device.test.ts tests/pos_persistence_async.test.ts"
+    "test": "npx tsx --test tests/pos_local.test.ts tests/pos_device.test.ts tests/pos_persistence_async.test.ts tests/draft_order_replacement.test.ts tests/additional_kot_local.test.ts tests/kot_correction_model_b.test.ts tests/local_payment_settlement_guard.test.ts"
   },
   "dependencies": {
     "@cheesyos/nextgen-shared": "file:../shared",

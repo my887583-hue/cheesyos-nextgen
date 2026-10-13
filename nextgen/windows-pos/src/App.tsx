@@ -10,6 +10,8 @@ import {
 } from './bootstrap';
 import { nativeProvisionDevice } from './tauri-adapter';
 import type { LocalDeviceConfig } from '@cheesyos/pos-local';
+import { TableFloor, SelectedOrderContext } from './components/TableFloor';
+import { OrderWorkspace } from './components/OrderWorkspace';
 
 export function App(): React.ReactElement {
   const [status, setStatus] = useState<HostRuntimeStatus>({
@@ -25,6 +27,9 @@ export function App(): React.ReactElement {
 
   const [deviceConfig, setDeviceConfig] = useState<LocalDeviceConfig | null>(null);
   const [staffSession, setStaffSession] = useState<StaffAuthSession | null>(null);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [selectedOrderContext, setSelectedOrderContext] = useState<SelectedOrderContext | null>(null);
+  const [activeWorkspaceContext, setActiveWorkspaceContext] = useState<SelectedOrderContext | null>(null);
 
   // Sign-in form state
   const [email, setEmail] = useState('');
@@ -90,6 +95,8 @@ export function App(): React.ReactElement {
   const handleSignOut = async () => {
     await signOutStaff();
     setStaffSession(null);
+    setSelectedOrderContext(null);
+    setActiveWorkspaceContext(null);
     setStatus((prev) => ({ ...prev, authSessionReady: false }));
     setAuthError(null);
     setProvisionError(null);
@@ -172,51 +179,110 @@ export function App(): React.ReactElement {
     }
   };
 
-  return (
-    <div style={{ fontFamily: 'sans-serif', padding: '24px', maxWidth: '800px', margin: '0 auto' }}>
-      <h1 style={{ color: '#1e293b', borderBottom: '2px solid #e2e8f0', paddingBottom: '12px' }}>
-        CheesyOS NextGen POS — Host Foundation
-      </h1>
+  const db = getLocalDbSingleton();
+  const isOperationalReady =
+    status.deviceConfigured &&
+    deviceConfig !== null &&
+    staffSession !== null &&
+    staffSession.profile.isActive &&
+    staffSession.profile.hasPosAccess &&
+    db !== null;
 
-      <div style={{ backgroundColor: '#f8fafc', padding: '16px', borderRadius: '8px', marginBottom: '20px' }}>
-        <h3>
+  // OPERATIONAL STATE: Staff authenticated + Device provisioned
+  if (isOperationalReady && !showDiagnostics) {
+    if (activeWorkspaceContext) {
+      return (
+        <OrderWorkspace
+          db={db}
+          context={activeWorkspaceContext}
+          terminalCode={deviceConfig.terminal_code}
+          staffName={staffSession.profile.fullName}
+          onBack={() => setActiveWorkspaceContext(null)}
+          onSignOut={handleSignOut}
+        />
+      );
+    }
+
+    return (
+      <TableFloor
+        db={db}
+        terminalCode={deviceConfig.terminal_code}
+        staffName={staffSession.profile.fullName}
+        staffRole={staffSession.profile.role}
+        onSignOut={handleSignOut}
+        onSelectOrderContext={(ctx) => setSelectedOrderContext(ctx)}
+        onEnterWorkspace={(ctx) => setActiveWorkspaceContext(ctx)}
+        onOpenDiagnostics={() => setShowDiagnostics(true)}
+      />
+    );
+  }
+
+  // SETUP / DIAGNOSTICS / AUTHENTICATION VIEW
+  return (
+    <div style={{ fontFamily: 'system-ui, -apple-system, sans-serif', padding: '24px', maxWidth: '800px', margin: '0 auto', color: '#0f172a' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '2px solid #e2e8f0', paddingBottom: '12px', marginBottom: '20px' }}>
+        <h1 style={{ margin: 0, color: '#1e293b', fontSize: '24px' }}>
+          CheesyOS NextGen POS — Host Foundation
+        </h1>
+        {isOperationalReady && (
+          <button
+            id="back-to-floor-button"
+            onClick={() => setShowDiagnostics(false)}
+            style={{
+              backgroundColor: '#0284c7',
+              color: '#ffffff',
+              border: 'none',
+              padding: '8px 16px',
+              borderRadius: '6px',
+              fontWeight: '600',
+              cursor: 'pointer',
+              fontSize: '13px',
+            }}
+          >
+            ← Back to Table Floor
+          </button>
+        )}
+      </div>
+
+      <div style={{ backgroundColor: '#f8fafc', padding: '16px', borderRadius: '8px', marginBottom: '20px', border: '1px solid #e2e8f0' }}>
+        <h3 style={{ margin: '0 0 8px 0', fontSize: '16px' }}>
           Application Host State:{' '}
           <span style={{ color: status.state === 'READY' ? '#16a34a' : status.state === 'ERROR' ? '#dc2626' : '#d97706' }}>
             {status.state}
           </span>
         </h3>
-        <p><strong>Environment:</strong> {status.browserCompatible ? 'Browser Renderer (Vite Web Host)' : 'Node / Desktop Host'}</p>
-        <p><strong>Auth Session Gate:</strong> {status.authSessionReady ? '✅ Active (Staff Session Ready)' : '🔒 Gated (Signed Out)'}</p>
+        <p style={{ margin: '4px 0', fontSize: '13px' }}><strong>Environment:</strong> {status.browserCompatible ? 'Browser Renderer (Vite Web Host)' : 'Node / Desktop Host'}</p>
+        <p style={{ margin: '4px 0', fontSize: '13px' }}><strong>Auth Session Gate:</strong> {status.authSessionReady ? '✅ Active (Staff Session Ready)' : '🔒 Gated (Signed Out)'}</p>
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '20px' }}>
-        <div style={{ border: '1px solid #cbd5e1', borderRadius: '6px', padding: '16px' }}>
-          <h4>Local Persistence Boundary</h4>
-          <p>Status: {status.localDbReady ? '✅ Ready (Tauri Desktop Boundary)' : '❌ Unavailable'}</p>
-          <p>Backend: <code>Tauri / Desktop Native Adapter (IPosLocalDatabase)</code></p>
+        <div style={{ border: '1px solid #cbd5e1', borderRadius: '6px', padding: '16px', backgroundColor: '#ffffff' }}>
+          <h4 style={{ margin: '0 0 8px 0' }}>Local Persistence Boundary</h4>
+          <p style={{ margin: '4px 0', fontSize: '13px' }}>Status: {status.localDbReady ? '✅ Ready (Tauri Desktop Boundary)' : '❌ Unavailable'}</p>
+          <p style={{ margin: '4px 0', fontSize: '13px' }}>Backend: <code>Tauri / Desktop Native Adapter (IPosLocalDatabase)</code></p>
           {status.localDbError && (
             <p style={{ color: '#dc2626', fontSize: '12px' }}>Error: {status.localDbError}</p>
           )}
         </div>
 
-        <div style={{ border: '1px solid #cbd5e1', borderRadius: '6px', padding: '16px' }}>
-          <h4>Cloud Client Boundary</h4>
-          <p>Status: {status.supabaseConfigured ? '✅ Configured (NextGen Dev)' : '⚠️ Environment Required'}</p>
-          <p>Project: <code>sdbnibyzqtgpbexlznat</code></p>
+        <div style={{ border: '1px solid #cbd5e1', borderRadius: '6px', padding: '16px', backgroundColor: '#ffffff' }}>
+          <h4 style={{ margin: '0 0 8px 0' }}>Cloud Client Boundary</h4>
+          <p style={{ margin: '4px 0', fontSize: '13px' }}>Status: {status.supabaseConfigured ? '✅ Configured (NextGen Dev)' : '⚠️ Environment Required'}</p>
+          <p style={{ margin: '4px 0', fontSize: '13px' }}>Project: <code>sdbnibyzqtgpbexlznat</code></p>
           {status.supabaseError && (
             <p style={{ color: '#dc2626', fontSize: '12px' }}>Error: {status.supabaseError}</p>
           )}
         </div>
 
-        <div style={{ border: '1px solid #cbd5e1', borderRadius: '6px', padding: '16px' }}>
-          <h4>Sync Runtime Boundary</h4>
-          <p>Orchestrator: {status.orchestratorReady ? '✅ Initialized' : '⏳ Waiting'}</p>
-          <p>Triggers: <code>Demand-driven (Single Flight)</code></p>
+        <div style={{ border: '1px solid #cbd5e1', borderRadius: '6px', padding: '16px', backgroundColor: '#ffffff' }}>
+          <h4 style={{ margin: '0 0 8px 0' }}>Sync Runtime Boundary</h4>
+          <p style={{ margin: '4px 0', fontSize: '13px' }}>Orchestrator: {status.orchestratorReady ? '✅ Initialized' : '⏳ Waiting'}</p>
+          <p style={{ margin: '4px 0', fontSize: '13px' }}>Triggers: <code>Demand-driven (Single Flight)</code></p>
         </div>
 
-        <div style={{ border: '1px solid #cbd5e1', borderRadius: '6px', padding: '16px' }}>
-          <h4>Terminal Identity Boundary</h4>
-          <p>Terminal Config: {status.deviceConfigured ? '✅ Configured' : '⚠️ DEVICE_NOT_PROVISIONED'}</p>
+        <div style={{ border: '1px solid #cbd5e1', borderRadius: '6px', padding: '16px', backgroundColor: '#ffffff' }}>
+          <h4 style={{ margin: '0 0 8px 0' }}>Terminal Identity Boundary</h4>
+          <p style={{ margin: '4px 0', fontSize: '13px' }}>Terminal Config: {status.deviceConfigured ? '✅ Configured' : '⚠️ DEVICE_NOT_PROVISIONED'}</p>
           {deviceConfig && (
             <div style={{ fontSize: '13px', backgroundColor: '#f1f5f9', padding: '8px', borderRadius: '4px', marginTop: '8px' }}>
               <div><strong>Terminal Code:</strong> {deviceConfig.terminal_code}</div>
@@ -225,7 +291,7 @@ export function App(): React.ReactElement {
             </div>
           )}
           {!deviceConfig && (
-            <p>Formatter: <code>CB-&#123;TERMINAL_CODE&#125;-&#123;LOCAL_SEQUENCE&#125;</code></p>
+            <p style={{ margin: '4px 0', fontSize: '13px' }}>Formatter: <code>CB-&#123;TERMINAL_CODE&#125;-&#123;LOCAL_SEQUENCE&#125;</code></p>
           )}
         </div>
       </div>
@@ -238,7 +304,7 @@ export function App(): React.ReactElement {
             This terminal is not yet registered. Authenticate as a staff administrator to provision this device.
           </p>
 
-          {/* Step 1: Staff Sign-In */}
+          {/* Step 1: Staff Sign-In for Unprovisioned Device */}
           {!staffSession ? (
             <form onSubmit={handleSignIn} style={{ display: 'flex', flexDirection: 'column', gap: '12px', maxWidth: '400px' }}>
               <div>
@@ -390,6 +456,72 @@ export function App(): React.ReactElement {
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Staff Sign-In Gate when device is provisioned but staff signed out */}
+      {status.deviceConfigured && !staffSession && (
+        <div style={{ border: '2px solid #e2e8f0', borderRadius: '8px', padding: '20px', backgroundColor: '#ffffff' }}>
+          <h3 style={{ marginTop: 0, color: '#1e293b' }}>Staff Authentication</h3>
+          <p style={{ color: '#64748b', fontSize: '14px', marginBottom: '16px' }}>
+            Device provisioned (Terminal: <strong>{deviceConfig?.terminal_code}</strong>). Enter staff credentials to unlock POS floor.
+          </p>
+
+          <form onSubmit={handleSignIn} style={{ display: 'flex', flexDirection: 'column', gap: '12px', maxWidth: '400px' }}>
+            <div>
+              <label style={{ display: 'block', fontSize: '13px', fontWeight: 'bold', marginBottom: '4px', color: '#334155' }}>
+                Staff Email
+              </label>
+              <input
+                id="staff-email-input"
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="staff@cheesybites.in"
+                required
+                style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #cbd5e1', fontSize: '14px' }}
+              />
+            </div>
+
+            <div>
+              <label style={{ display: 'block', fontSize: '13px', fontWeight: 'bold', marginBottom: '4px', color: '#334155' }}>
+                Staff Password
+              </label>
+              <input
+                id="staff-password-input"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="••••••••••••"
+                required
+                style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #cbd5e1', fontSize: '14px' }}
+              />
+            </div>
+
+            {authError && (
+              <div style={{ color: '#dc2626', fontSize: '13px', backgroundColor: '#fef2f2', padding: '8px', borderRadius: '4px' }}>
+                Error: {authError}
+              </div>
+            )}
+
+            <button
+              id="staff-signin-button"
+              type="submit"
+              disabled={authLoading}
+              style={{
+                backgroundColor: authLoading ? '#94a3b8' : '#2563eb',
+                color: '#ffffff',
+                padding: '10px 16px',
+                border: 'none',
+                borderRadius: '4px',
+                fontWeight: 'bold',
+                cursor: authLoading ? 'not-allowed' : 'pointer',
+                fontSize: '14px',
+              }}
+            >
+              {authLoading ? 'Signing In...' : 'Unlock POS Floor'}
+            </button>
+          </form>
         </div>
       )}
     </div>

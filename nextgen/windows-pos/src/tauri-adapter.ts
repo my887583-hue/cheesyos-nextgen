@@ -19,6 +19,7 @@ import type {
   KotCorrectionDomain,
   BillDomain,
   PaymentDomain,
+  TableSessionDomain,
 } from '@cheesyos/nextgen-shared';
 import type {
   IPosPersistence,
@@ -29,10 +30,19 @@ import type {
   PullDataset,
   SaveOrderResult,
   SaveKotResult,
+  AppendOrderItemsAndKotResult,
   SaveBillWithSequenceResult,
   SavePaymentResult,
   SaveInventoryMovementInput,
   SaveInventoryMovementResult,
+  TableWithActiveSession,
+  PosCatalog,
+  ActiveTableOrderResult,
+  LocalBill,
+  TableOccupancyStatus,
+  ApplyKotCorrectionInput,
+  ApplyKotCorrectionLocalResult,
+  OrderKotHeaderWithItems,
 } from '@cheesyos/pos-local';
 import { toPaise } from '@cheesyos/pos-core';
 import type { CloudRpcTransport } from '@cheesyos/pos-sync';
@@ -136,6 +146,7 @@ export class TauriPosPersistence implements IPosPersistence {
       delivery_charge_paise: toPaise(order.delivery_charge),
       grand_total_paise: toPaise(order.grand_total),
       device_id: order.device_id || null,
+      version: order.version ?? 1,
       created_at: order.created_at,
       updated_at: order.updated_at,
     };
@@ -171,6 +182,64 @@ export class TauriPosPersistence implements IPosPersistence {
       order,
       items,
       outboxEntries: res.outbox_entries || [],
+    };
+  }
+
+  public async replaceDraftOrderAggregate(order: OrderDomain, items: OrderItemDomain[]): Promise<SaveOrderResult> {
+    const orderPayload = {
+      id: order.id,
+      display_number: order.display_number || null,
+      channel: order.channel,
+      order_type: order.order_type,
+      customer_id: order.customer_id || null,
+      table_session_id: order.table_session_id || null,
+      status: order.status,
+      subtotal_paise: toPaise(order.subtotal),
+      tax_total_paise: toPaise(order.tax_total),
+      discount_total_paise: toPaise(order.discount_total),
+      delivery_charge_paise: toPaise(order.delivery_charge),
+      grand_total_paise: toPaise(order.grand_total),
+      device_id: order.device_id || null,
+      version: order.version,
+      created_at: order.created_at,
+      updated_at: order.updated_at,
+    };
+
+    const itemsPayload = items.map((item) => ({
+      id: item.id,
+      order_id: item.order_id,
+      product_id: item.product_id,
+      variant_id: item.variant_id || null,
+      product_name: item.product_name,
+      unit_price_paise: toPaise(item.unit_price),
+      quantity: item.quantity,
+      tax_rate: item.tax_rate,
+      discount_amount_paise: toPaise(item.discount_amount),
+      line_total_paise: toPaise(item.line_total),
+      notes: item.notes || null,
+      created_at: item.created_at,
+    }));
+
+    const res = await this.invoke('pos_db_execute', {
+      op: {
+        type: 'ReplaceDraftOrderAggregate',
+        payload: {
+          order: orderPayload,
+          items: itemsPayload,
+        },
+      },
+    });
+
+    this.notifyCommittedWrite('orders');
+
+    return {
+      order: {
+        ...order,
+        version: res?.order?.version ?? order.version,
+        updated_at: res?.order?.updated_at ?? order.updated_at,
+      },
+      items,
+      outboxEntries: res?.outbox_entries || [],
     };
   }
 
@@ -215,6 +284,88 @@ export class TauriPosPersistence implements IPosPersistence {
     };
   }
 
+  public async appendOrderItemsAndKot(
+    order: OrderDomain,
+    newItems: OrderItemDomain[],
+    kot: PosKotDomain,
+    kotItems: KotItemDomain[]
+  ): Promise<AppendOrderItemsAndKotResult> {
+    const orderPayload = {
+      id: order.id,
+      display_number: order.display_number || null,
+      channel: order.channel,
+      order_type: order.order_type,
+      customer_id: order.customer_id || null,
+      table_session_id: order.table_session_id || null,
+      status: order.status,
+      subtotal: order.subtotal,
+      tax_total: order.tax_total,
+      discount_total: order.discount_total,
+      delivery_charge: order.delivery_charge,
+      grand_total: order.grand_total,
+      device_id: order.device_id || null,
+      version: order.version || 1,
+      created_at: order.created_at,
+      updated_at: order.updated_at,
+    };
+
+    const newItemsPayload = newItems.map((item) => ({
+      id: item.id,
+      order_id: item.order_id,
+      product_id: item.product_id,
+      variant_id: item.variant_id || null,
+      product_name: item.product_name,
+      unit_price: item.unit_price,
+      quantity: item.quantity,
+      tax_rate: item.tax_rate,
+      discount_amount: item.discount_amount,
+      line_total: item.line_total,
+      notes: item.notes || null,
+      created_at: item.created_at,
+    }));
+
+    const kotPayload = {
+      id: kot.id,
+      order_id: kot.order_id,
+      kot_number: kot.kot_number,
+      device_id: kot.device_id || null,
+      status: kot.status,
+      printed_at: kot.printed_at,
+    };
+
+    const kotItemsPayload = kotItems.map((item) => ({
+      id: item.id,
+      kot_id: item.kot_id,
+      product_id: item.product_id,
+      variant_id: item.variant_id || null,
+      product_name: item.product_name,
+      quantity: item.quantity,
+      notes: item.notes || null,
+    }));
+
+    const res = await this.invoke('pos_db_execute', {
+      op: {
+        type: 'AppendOrderItemsAndKot',
+        payload: {
+          order: orderPayload,
+          new_items: newItemsPayload,
+          kot: kotPayload,
+          kot_items: kotItemsPayload,
+        },
+      },
+    });
+
+    this.notifyCommittedWrite('pos_kots');
+
+    return {
+      order: res?.order ?? order,
+      newItems: res?.new_items ?? newItems,
+      kot: res?.kot ?? kot,
+      kotItems: res?.kot_items ?? kotItems,
+      outboxEntries: res?.outbox_entries || [],
+    };
+  }
+
   public async saveKotCorrection(correction: KotCorrectionDomain): Promise<OutboxRow> {
     const correctionPayload = {
       id: correction.id,
@@ -237,6 +388,86 @@ export class TauriPosPersistence implements IPosPersistence {
     this.notifyCommittedWrite('kot_corrections');
 
     return res as OutboxRow;
+  }
+
+  public async applyKotCorrection(input: ApplyKotCorrectionInput): Promise<ApplyKotCorrectionLocalResult> {
+    const correctionPayload = {
+      id: input.correction.id,
+      order_id: input.correction.order_id,
+      kot_id: input.correction.kot_id || null,
+      kot_item_id: input.correction.kot_item_id || null,
+      order_item_id: input.correction.order_item_id || null,
+      product_name: input.correction.product_name,
+      cancelled_qty: input.correction.cancelled_qty,
+      reason: input.correction.reason,
+      authorized_by_staff_id: input.correction.authorized_by_staff_id,
+      created_at: input.correction.created_at,
+    };
+
+    const updatedOrderItemPayload = {
+      id: input.updatedOrderItem.id,
+      order_id: input.updatedOrderItem.order_id,
+      product_id: input.updatedOrderItem.product_id,
+      variant_id: input.updatedOrderItem.variant_id ?? null,
+      product_name: input.updatedOrderItem.product_name,
+      unit_price_paise: toPaise(input.updatedOrderItem.unit_price),
+      quantity: input.updatedOrderItem.quantity,
+      tax_rate: input.updatedOrderItem.tax_rate ?? 5.0,
+      discount_amount_paise: toPaise(input.updatedOrderItem.discount_amount ?? 0),
+      line_total_paise: toPaise(input.updatedOrderItem.line_total),
+      notes: input.updatedOrderItem.notes ?? null,
+      created_at: input.updatedOrderItem.created_at,
+    };
+
+    const updatedOrderPayload = {
+      id: input.updatedOrder.id,
+      display_number: input.updatedOrder.display_number ?? null,
+      channel: input.updatedOrder.channel,
+      order_type: input.updatedOrder.order_type,
+      customer_id: input.updatedOrder.customer_id ?? null,
+      table_session_id: input.updatedOrder.table_session_id ?? null,
+      status: input.updatedOrder.status,
+      subtotal_paise: toPaise(input.updatedOrder.subtotal),
+      tax_total_paise: toPaise(input.updatedOrder.tax_total),
+      discount_total_paise: toPaise(input.updatedOrder.discount_total),
+      delivery_charge_paise: toPaise(input.updatedOrder.delivery_charge),
+      grand_total_paise: toPaise(input.updatedOrder.grand_total),
+      device_id: input.updatedOrder.device_id ?? null,
+      version: input.updatedOrder.version,
+      created_at: input.updatedOrder.created_at,
+      updated_at: input.updatedOrder.updated_at,
+    };
+
+    const res = await this.invoke('pos_db_execute', {
+      op: {
+        type: 'ApplyKotCorrection',
+        payload: {
+          correction: correctionPayload,
+          updated_order_item: updatedOrderItemPayload,
+          updated_order: updatedOrderPayload,
+        },
+      },
+    }) as any;
+
+    this.notifyCommittedWrite('kot_corrections');
+
+    return {
+      correction: input.correction,
+      updatedOrderItem: input.updatedOrderItem,
+      updatedOrder: input.updatedOrder,
+      outboxEntry: res?.outbox_entries?.[0] || res?.outbox_entry || {
+        seq: 0,
+        id: '',
+        entity_type: 'kot_corrections',
+        entity_id: input.correction.id,
+        operation: 'INSERT',
+        payload_json: '',
+        created_at: input.correction.created_at,
+        attempt_count: 0,
+        next_attempt_at: null,
+        last_error: null,
+      },
+    };
   }
 
   // --- 6: Bill with Atomic Sequence Allocation ---
@@ -420,6 +651,110 @@ export class TauriPosPersistence implements IPosPersistence {
     });
     return Number(res?.rowsApplied ?? 0);
   }
+
+  // --- 14: Tables with Sessions ---
+
+  public async getTablesWithSessions(): Promise<TableWithActiveSession[]> {
+    const res = await this.invoke('pos_db_query', {
+      query: { type: 'GetTablesWithSessions' },
+    });
+    return (res || []) as TableWithActiveSession[];
+  }
+
+  // --- 15: Catalog ---
+
+  public async getCatalog(): Promise<PosCatalog> {
+    const res = await this.invoke('pos_db_query', {
+      query: { type: 'GetCatalog' },
+    });
+    return res as PosCatalog;
+  }
+
+  // --- 16: Active Order For Table ---
+
+  public async getActiveOrderForTable(tableId: string): Promise<ActiveTableOrderResult | null> {
+    const res = await this.invoke('pos_db_query', {
+      query: {
+        type: 'GetActiveOrderForTable',
+        payload: { table_id: tableId },
+      },
+    });
+    return res ? (res as ActiveTableOrderResult) : null;
+  }
+
+  // --- 17: Bill For Order ---
+
+  public async getBillForOrder(orderId: string): Promise<LocalBill | null> {
+    const res = await this.invoke('pos_db_query', {
+      query: {
+        type: 'GetBillForOrder',
+        payload: { order_id: orderId },
+      },
+    });
+    return res ? (res as LocalBill) : null;
+  }
+
+  // --- 18: Open Table Session ---
+
+  public async openTableSession(tableId: string, guestCount: number): Promise<TableSessionDomain> {
+    const res = await this.invoke('pos_db_execute', {
+      op: {
+        type: 'OpenTableSession',
+        payload: {
+          table_id: tableId,
+          guest_count: guestCount,
+        },
+      },
+    });
+
+    this.notifyCommittedWrite('table_sessions');
+    return res as TableSessionDomain;
+  }
+
+  // --- 19: Close Table Session ---
+
+  public async closeTableSession(sessionId: string, orderId: string): Promise<void> {
+    await this.invoke('pos_db_execute', {
+      op: {
+        type: 'CloseTableSession',
+        payload: {
+          session_id: sessionId,
+          order_id: orderId,
+        },
+      },
+    });
+
+    this.notifyCommittedWrite('table_sessions');
+    this.notifyCommittedWrite('orders');
+  }
+
+  // --- 20: KOTs with Items for Order ---
+
+  public async getKotsForOrder(orderId: string): Promise<OrderKotHeaderWithItems[]> {
+    const res = await this.invoke('pos_db_query', {
+      query: {
+        type: 'GetKotsForOrder',
+        payload: { order_id: orderId },
+      },
+    });
+    return (res || []) as OrderKotHeaderWithItems[];
+  }
+}
+
+export type {
+  TableWithActiveSession,
+  PosCatalog,
+  ActiveTableOrderResult,
+  LocalBill,
+  TableOccupancyStatus,
+  OrderKotHeaderWithItems,
+};
+
+export function deriveTableOccupancy(session: TableSessionDomain | null | undefined): TableOccupancyStatus {
+  if (!session) return 'AVAILABLE';
+  if (session.session_status === 'open') return 'OCCUPIED';
+  if (session.session_status === 'billed') return 'BILLED';
+  return 'AVAILABLE';
 }
 
 /**
@@ -498,7 +833,7 @@ export function createTauriPushTransport(
   }
 
   const dispatchNativeRpc = async (
-    op: 'order' | 'kot' | 'kot_correction' | 'bill' | 'payment' | 'inventory_movement',
+    op: 'order' | 'kot' | 'kot_correction' | 'bill' | 'payment' | 'inventory_movement' | 'table_session' | 'replace_draft_order' | 'append_order_items_and_kot',
     payload: Record<string, unknown>
   ): Promise<boolean> => {
     const staffToken = await getStaffToken();
@@ -565,14 +900,24 @@ export function createTauriPushTransport(
   };
 
   return {
+    async syncTableSession(session) {
+      return await dispatchNativeRpc('table_session', { session });
+    },
     async syncOrder(order, items) {
       return await dispatchNativeRpc('order', { order, items });
+    },
+    async replaceDraftOrder(order, items) {
+      return await dispatchNativeRpc('replace_draft_order', { order, items });
     },
     async syncKot(kot, items) {
       return await dispatchNativeRpc('kot', { kot, items });
     },
-    async syncKotCorrection(correction) {
-      return await dispatchNativeRpc('kot_correction', { correction });
+    async syncKotCorrection(correction, updatedOrderItem, updatedOrder) {
+      return await dispatchNativeRpc('kot_correction', {
+        correction,
+        updatedOrderItem,
+        updatedOrder,
+      });
     },
     async syncBill(bill) {
       return await dispatchNativeRpc('bill', { bill });
@@ -582,6 +927,14 @@ export function createTauriPushTransport(
     },
     async applyInventoryMovement(input) {
       return await dispatchNativeRpc('inventory_movement', input as Record<string, unknown>);
+    },
+    async appendOrderItemsAndKot(order, newOrderItems, kot, kotItems) {
+      return await dispatchNativeRpc('append_order_items_and_kot', {
+        order,
+        orderItems: newOrderItems,
+        kot,
+        items: kotItems,
+      });
     },
   };
 }

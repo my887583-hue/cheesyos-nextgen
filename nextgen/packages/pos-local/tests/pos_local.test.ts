@@ -22,6 +22,7 @@ import {
   savePaymentTransaction,
   saveInventoryMovementTransaction,
   insertOutboxRecord,
+  SCHEMA_VERSION,
 } from '../src/index.js';
 
 describe('1. SQLite Persistence Initialization & Constraints', () => {
@@ -29,7 +30,7 @@ describe('1. SQLite Persistence Initialization & Constraints', () => {
     const dbManager = new PosLocalDatabase(':memory:');
     const rawDb = dbManager.getRawDb();
 
-    assert.equal(dbManager.getSchemaVersion(), 2);
+    assert.equal(dbManager.getSchemaVersion(), SCHEMA_VERSION);
 
     const fkResult = rawDb.prepare('PRAGMA foreign_keys;').get() as { foreign_keys: number };
     assert.equal(fkResult.foreign_keys, 1);
@@ -298,5 +299,126 @@ describe('4. Inventory Movement Fixed Identity & Idempotency', () => {
     if (fs.existsSync(`${dbPath}-wal`)) fs.unlinkSync(`${dbPath}-wal`);
     if (fs.existsSync(`${dbPath}-shm`)) fs.unlinkSync(`${dbPath}-shm`);
     if (fs.existsSync(tmpDir)) fs.rmdirSync(tmpDir);
+  });
+});
+
+describe('5. Task 3G.2-09C.1 — Semantic Read getKotsForOrder', () => {
+  test('GET_KOTS_FOR_ORDER complete verification suite', async () => {
+    const dbManager = new PosLocalDatabase(':memory:');
+    const rawDb = dbManager.getRawDb();
+
+    // 1. GET_KOTS_FOR_ORDER_EMPTY_PASS
+    const emptyKots = await dbManager.getKotsForOrder('ord-non-existent');
+    assert.deepEqual(emptyKots, [], 'GET_KOTS_FOR_ORDER_EMPTY_PASS: non-existent order returns empty array');
+
+    // Setup base master and order rows
+    rawDb.prepare(`INSERT INTO categories (id, name, slug, created_at, updated_at) VALUES ('cat-1', 'Burgers', 'burgers', 'now', 'now')`).run();
+    rawDb.prepare(`INSERT INTO products (id, category_id, name, base_price_paise, created_at, updated_at) VALUES ('prod-1', 'cat-1', 'Burger', 10000, 'now', 'now')`).run();
+    rawDb.prepare(`INSERT INTO products (id, category_id, name, base_price_paise, created_at, updated_at) VALUES ('prod-2', 'cat-1', 'Fries', 5000, 'now', 'now')`).run();
+
+    const orderId = 'ord-kot-read-1';
+    rawDb.prepare(`
+      INSERT INTO orders (id, display_number, channel, order_type, status, subtotal_paise, tax_total_paise, discount_total_paise, delivery_charge_paise, grand_total_paise, version, created_at, updated_at)
+      VALUES (?, 'CB-01', 'POS', 'DINE_IN', 'kot_sent', 25000, 1250, 0, 0, 26250, 1, 'now', 'now')
+    `).run(orderId);
+
+    // Insert order items
+    const orderItemId1 = 'oitem-1';
+    const orderItemId2 = 'oitem-2';
+    rawDb.prepare(`
+      INSERT INTO order_items (id, order_id, product_id, product_name, unit_price_paise, quantity, tax_rate, discount_amount_paise, line_total_paise, created_at)
+      VALUES (?, ?, 'prod-1', 'Burger', 10000, 2, 5.0, 0, 21000, 'now')
+    `).run(orderItemId1, orderId);
+    rawDb.prepare(`
+      INSERT INTO order_items (id, order_id, product_id, product_name, unit_price_paise, quantity, tax_rate, discount_amount_paise, line_total_paise, created_at)
+      VALUES (?, ?, 'prod-1', 'Burger', 10000, 1, 5.0, 0, 10500, 'now')
+    `).run(orderItemId2, orderId);
+
+    // Insert KOT 2 FIRST to verify deterministic ordering
+    const kotId2 = 'kot-uuid-2';
+    rawDb.prepare(`
+      INSERT INTO pos_kots (id, order_id, kot_number, device_id, status, printed_at)
+      VALUES (?, ?, 2, 'dev-1', 'printed', '2026-10-12T10:15:00Z')
+    `).run(kotId2, orderId);
+
+    const kotItemId2 = 'kitem-uuid-2';
+    rawDb.prepare(`
+      INSERT INTO kot_items (id, kot_id, order_item_id, product_id, product_name, quantity, notes)
+      VALUES (?, ?, ?, 'prod-1', 'Burger', 1, 'Extra cheese')
+    `).run(kotItemId2, kotId2, orderItemId2);
+
+    // Verify GET_KOTS_FOR_ORDER_SINGLE_KOT_PASS
+    const singleKot = await dbManager.getKotsForOrder(orderId);
+    assert.equal(singleKot.length, 1, 'GET_KOTS_FOR_ORDER_SINGLE_KOT_PASS: returns exactly 1 KOT');
+    assert.equal(singleKot[0].kot.kot_number, 2);
+    assert.equal(singleKot[0].items.length, 1);
+
+    // Insert KOT 1 SECOND
+    const kotId1 = 'kot-uuid-1';
+    rawDb.prepare(`
+      INSERT INTO pos_kots (id, order_id, kot_number, device_id, status, printed_at)
+      VALUES (?, ?, 1, 'dev-1', 'printed', '2026-10-12T10:05:00Z')
+    `).run(kotId1, orderId);
+
+    const kotItemId1 = 'kitem-uuid-1';
+    rawDb.prepare(`
+      INSERT INTO kot_items (id, kot_id, order_item_id, product_id, product_name, quantity, notes)
+      VALUES (?, ?, ?, 'prod-1', 'Burger', 2, NULL)
+    `).run(kotItemId1, kotId1, orderItemId1);
+
+    // Historical KOT item with NULL order_item_id in KOT 1
+    const kotItemIdHist = 'kitem-uuid-hist';
+    rawDb.prepare(`
+      INSERT INTO kot_items (id, kot_id, order_item_id, product_id, product_name, quantity, notes)
+      VALUES (?, ?, NULL, 'prod-2', 'Fries', 1, NULL)
+    `).run(kotItemIdHist, kotId1);
+
+    // Initial Outbox count
+    const outboxCountBefore = (rawDb.prepare('SELECT count(*) as count FROM sync_outbox').get() as { count: number }).count;
+
+    // Execute semantic read
+    const kots = await dbManager.getKotsForOrder(orderId);
+
+    // 2. GET_KOTS_FOR_ORDER_MULTIPLE_KOTS_PASS
+    assert.equal(kots.length, 2, 'GET_KOTS_FOR_ORDER_MULTIPLE_KOTS_PASS: returns exactly 2 KOTs');
+
+    // 3. KOT_ORDERING_BY_KOT_NUMBER_PASS
+    assert.equal(kots[0].kot.kot_number, 1, 'KOT_ORDERING_BY_KOT_NUMBER_PASS: KOT 1 comes first');
+    assert.equal(kots[1].kot.kot_number, 2, 'KOT_ORDERING_BY_KOT_NUMBER_PASS: KOT 2 comes second');
+    assert.equal(kots[0].kot.id, kotId1);
+    assert.equal(kots[1].kot.id, kotId2);
+
+    // 4. KOT_ITEMS_RETURNED_PASS & SAME_PRODUCT_MULTI_KOT_NOT_MERGED_PASS
+    assert.equal(kots[0].items.length, 2, 'KOT 1 has 2 items');
+    assert.equal(kots[1].items.length, 1, 'KOT 2 has 1 item');
+
+    // 5. KOT_ITEM_ORDER_ITEM_ID_RETURNED_PASS
+    const item1 = kots[0].items.find((it) => it.id === kotItemId1);
+    assert.notEqual(item1, undefined);
+    assert.equal(item1?.order_item_id, orderItemId1, 'KOT_ITEM_ORDER_ITEM_ID_RETURNED_PASS: order_item_id matches');
+    assert.equal(item1?.quantity, 2, 'IMMUTABLE_SENT_QUANTITY_RETURNED_PASS: sent quantity is 2');
+
+    // 6. HISTORICAL_NULL_ORDER_ITEM_ID_PRESERVED_PASS
+    const itemHist = kots[0].items.find((it) => it.id === kotItemIdHist);
+    assert.notEqual(itemHist, undefined);
+    assert.strictEqual(itemHist?.order_item_id, null, 'HISTORICAL_NULL_ORDER_ITEM_ID_PRESERVED_PASS: null preserved');
+
+    // 7. SAME_PRODUCT_MULTI_KOT_NOT_MERGED_PASS
+    const item2 = kots[1].items.find((it) => it.id === kotItemId2);
+    assert.notEqual(item2, undefined);
+    assert.equal(item2?.product_name, 'Burger');
+    assert.equal(item2?.order_item_id, orderItemId2);
+    assert.notEqual(item1?.id, item2?.id, 'SAME_PRODUCT_MULTI_KOT_NOT_MERGED_PASS: Burger lines in KOT 1 and KOT 2 remain distinct');
+
+    // 8. IMMUTABLE_SENT_QUANTITY_RETURNED_PASS
+    // Mutate commercial order_item to simulate a correction
+    rawDb.prepare(`UPDATE order_items SET quantity = 1 WHERE id = ?`).run(orderItemId1);
+    const kotsAfterCorrection = await dbManager.getKotsForOrder(orderId);
+    const item1After = kotsAfterCorrection[0].items.find((it) => it.id === kotItemId1);
+    assert.equal(item1After?.quantity, 2, 'IMMUTABLE_SENT_QUANTITY_RETURNED_PASS: kot_items.quantity still returns 2 after order_items updated');
+
+    // 9. READ_DOES_NOT_CREATE_OUTBOX_PASS
+    const outboxCountAfter = (rawDb.prepare('SELECT count(*) as count FROM sync_outbox').get() as { count: number }).count;
+    assert.equal(outboxCountAfter, outboxCountBefore, 'READ_DOES_NOT_CREATE_OUTBOX_PASS: zero outbox rows created');
   });
 });

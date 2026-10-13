@@ -126,8 +126,16 @@ export interface SyncCursor {
  */
 export function hasPendingOutboxRecord(dbInput: ISQLiteDatabase | IPosLocalDatabase | DatabaseSync, entityId: string): boolean {
   const db = extractRawDb(dbInput);
-  const stmt = db.prepare('SELECT 1 FROM sync_outbox WHERE entity_id = ? LIMIT 1');
-  const row = stmt.get(entityId);
+  const stmt = db.prepare(`
+    SELECT 1 FROM sync_outbox 
+    WHERE entity_id = ? 
+       OR json_extract(payload_json, '$.kot.order_id') = ?
+       OR json_extract(payload_json, '$.order.id') = ?
+       OR json_extract(payload_json, '$.correction.order_id') = ?
+       OR json_extract(payload_json, '$.updatedOrderItem.id') = ?
+    LIMIT 1
+  `);
+  const row = stmt.get(entityId, entityId, entityId, entityId, entityId);
   return !!row;
 }
 

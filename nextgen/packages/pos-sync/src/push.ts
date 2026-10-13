@@ -22,8 +22,13 @@ export const MAX_PUSH_BATCH_SIZE = 10;
 
 export interface CloudRpcTransport {
   syncOrder(order: Record<string, unknown>, items: Array<Record<string, unknown>>): Promise<boolean>;
+  replaceDraftOrder?(order: Record<string, unknown>, items: Array<Record<string, unknown>>): Promise<boolean>;
   syncKot(kot: Record<string, unknown>, items: Array<Record<string, unknown>>): Promise<boolean>;
-  syncKotCorrection(correction: Record<string, unknown>): Promise<boolean>;
+  syncKotCorrection(
+    correction: Record<string, unknown>,
+    updatedOrderItem?: Record<string, unknown>,
+    updatedOrder?: Record<string, unknown>
+  ): Promise<boolean>;
   syncBill(bill: Record<string, unknown>): Promise<boolean>;
   syncPayment(payment: Record<string, unknown>): Promise<boolean>;
   applyInventoryMovement(input: {
@@ -34,6 +39,13 @@ export interface CloudRpcTransport {
     movementId?: string;
     referenceMovementId?: string | null;
   }): Promise<boolean>;
+  syncTableSession(session: Record<string, unknown>): Promise<boolean>;
+  appendOrderItemsAndKot?(
+    order: Record<string, unknown>,
+    newOrderItems: Array<Record<string, unknown>>,
+    kot: Record<string, unknown>,
+    kotItems: Array<Record<string, unknown>>
+  ): Promise<boolean>;
 }
 
 /**
@@ -43,6 +55,22 @@ export function createSupabasePushTransport(
   client: SupabaseClient<Database>
 ): CloudRpcTransport {
   return {
+    async syncTableSession(session) {
+      const { data, error } = await (client.rpc as any)('secure_sync_pos_table_session', {
+        p_session: session,
+      });
+      if (error) {
+        if (error.message.includes('CONTRACT_CONFLICT') || error.message.includes('VALIDATION_ERROR')) {
+          throw new PushSyncError('CONTRACT_CONFLICT', error.message, error);
+        }
+        if (error.message.includes('Access Denied') || error.message.includes('DEVICE_REVOKED') || error.message.includes('DEVICE_AUTH_FAILED') || error.code === '42501') {
+          throw new PushSyncError('AUTH_REQUIRED', error.message, error);
+        }
+        throw new PushSyncError('RETRYABLE', error.message, error);
+      }
+      return data ?? true;
+    },
+
     async syncOrder(order, items) {
       const { data, error } = await client.rpc('secure_sync_pos_order', {
         p_order: order,
@@ -53,6 +81,34 @@ export function createSupabasePushTransport(
           throw new PushSyncError('CONTRACT_CONFLICT', error.message, error);
         }
         if (error.message.includes('Access Denied') || error.message.includes('DEVICE_REVOKED') || error.message.includes('DEVICE_AUTH_FAILED') || error.code === '42501') {
+          throw new PushSyncError('AUTH_REQUIRED', error.message, error);
+        }
+        throw new PushSyncError('RETRYABLE', error.message, error);
+      }
+      return data ?? true;
+    },
+
+    async replaceDraftOrder(order, items) {
+      const { data, error } = await (client.rpc as any)('secure_replace_pos_draft_order', {
+        p_order: order,
+        p_order_items: items,
+      });
+      if (error) {
+        if (
+          error.message.includes('CONTRACT_CONFLICT') ||
+          error.message.includes('VALIDATION_ERROR') ||
+          error.message.includes('VERSION_CONFLICT') ||
+          error.message.includes('STALE_VERSION') ||
+          error.message.includes('VERSION_GAP')
+        ) {
+          throw new PushSyncError('CONTRACT_CONFLICT', error.message, error);
+        }
+        if (
+          error.message.includes('Access Denied') ||
+          error.message.includes('DEVICE_REVOKED') ||
+          error.message.includes('DEVICE_AUTH_FAILED') ||
+          error.code === '42501'
+        ) {
           throw new PushSyncError('AUTH_REQUIRED', error.message, error);
         }
         throw new PushSyncError('RETRYABLE', error.message, error);
@@ -77,7 +133,37 @@ export function createSupabasePushTransport(
       return data ?? true;
     },
 
-    async syncKotCorrection(correction) {
+    async syncKotCorrection(correction, updatedOrderItem, updatedOrder) {
+      if (updatedOrderItem && updatedOrder) {
+        const { data, error } = await (client.rpc as any)('secure_save_kot_correction', {
+          p_correction: correction,
+          p_updated_order_item: updatedOrderItem,
+          p_updated_order: updatedOrder,
+        });
+        if (error) {
+          if (
+            error.message.includes('CONTRACT_CONFLICT') ||
+            error.message.includes('VALIDATION_ERROR') ||
+            error.message.includes('IDEMPOTENCY_CONFLICT') ||
+            error.message.includes('ORDER_ITEM_NOT_FOUND') ||
+            error.message.includes('KOT_ITEM_NOT_FOUND') ||
+            error.message.includes('CORRECTION_LINEAGE_UNAVAILABLE')
+          ) {
+            throw new PushSyncError('CONTRACT_CONFLICT', error.message, error);
+          }
+          if (
+            error.message.includes('Access Denied') ||
+            error.message.includes('DEVICE_REVOKED') ||
+            error.message.includes('DEVICE_AUTH_FAILED') ||
+            error.code === '42501'
+          ) {
+            throw new PushSyncError('AUTH_REQUIRED', error.message, error);
+          }
+          throw new PushSyncError('RETRYABLE', error.message, error);
+        }
+        return data ?? true;
+      }
+
       const { data, error } = await client.rpc('secure_sync_kot_correction', {
         p_correction: correction,
       });
@@ -86,6 +172,35 @@ export function createSupabasePushTransport(
           throw new PushSyncError('CONTRACT_CONFLICT', error.message, error);
         }
         if (error.message.includes('Access Denied') || error.message.includes('DEVICE_REVOKED') || error.message.includes('DEVICE_AUTH_FAILED') || error.code === '42501') {
+          throw new PushSyncError('AUTH_REQUIRED', error.message, error);
+        }
+        throw new PushSyncError('RETRYABLE', error.message, error);
+      }
+      return data ?? true;
+    },
+
+    async appendOrderItemsAndKot(order, newOrderItems, kot, kotItems) {
+      const { data, error } = await (client.rpc as any)('secure_append_pos_order_items_and_kot', {
+        p_order: order,
+        p_order_items: newOrderItems,
+        p_kot: kot,
+        p_kot_items: kotItems,
+      });
+      if (error) {
+        if (
+          error.message.includes('CONTRACT_CONFLICT') ||
+          error.message.includes('VALIDATION_ERROR') ||
+          error.message.includes('IDEMPOTENCY_CONFLICT') ||
+          error.message.includes('NUMBERING_CONFLICT')
+        ) {
+          throw new PushSyncError('CONTRACT_CONFLICT', error.message, error);
+        }
+        if (
+          error.message.includes('Access Denied') ||
+          error.message.includes('DEVICE_REVOKED') ||
+          error.message.includes('DEVICE_AUTH_FAILED') ||
+          error.code === '42501'
+        ) {
           throw new PushSyncError('AUTH_REQUIRED', error.message, error);
         }
         throw new PushSyncError('RETRYABLE', error.message, error);
@@ -218,15 +333,39 @@ export async function runPushCycle(options: PushCycleOptions): Promise<PushCycle
         // Order aggregate payload: { order, items }
         const orderData = payload.order || payload;
         const itemsData = payload.items || [];
-        await options.transport.syncOrder(orderData, itemsData);
+        if (row.operation === 'UPDATE') {
+          if (typeof options.transport.replaceDraftOrder === 'function') {
+            await options.transport.replaceDraftOrder(orderData, itemsData);
+          } else {
+            throw new PushSyncError('QUEUE_CONFLICT', 'Transport does not implement replaceDraftOrder for draft order UPDATE');
+          }
+        } else {
+          await options.transport.syncOrder(orderData, itemsData);
+        }
+      } else if (row.entity_type === 'table_sessions') {
+        const sessionData = payload.session || payload;
+        await options.transport.syncTableSession(sessionData);
       } else if (row.entity_type === 'pos_kots') {
-        // KOT aggregate payload: { kot, items }
+        // KOT aggregate payload: { kot, items, orderItems?, order? }
         const kotData = payload.kot || payload;
         const itemsData = payload.items || [];
-        await options.transport.syncKot(kotData, itemsData);
+        const orderItemsData = payload.orderItems || payload.order_items;
+        const orderData = payload.order;
+
+        if (orderItemsData && Array.isArray(orderItemsData) && orderItemsData.length > 0 && orderData) {
+          if (typeof options.transport.appendOrderItemsAndKot === 'function') {
+            await options.transport.appendOrderItemsAndKot(orderData, orderItemsData, kotData, itemsData);
+          } else {
+            throw new PushSyncError('QUEUE_CONFLICT', 'Transport does not implement appendOrderItemsAndKot for additional KOT');
+          }
+        } else {
+          await options.transport.syncKot(kotData, itemsData);
+        }
       } else if (row.entity_type === 'kot_corrections') {
         const correctionData = payload.correction || payload;
-        await options.transport.syncKotCorrection(correctionData);
+        const updatedOrderItemData = payload.updatedOrderItem;
+        const updatedOrderData = payload.updatedOrder;
+        await options.transport.syncKotCorrection(correctionData, updatedOrderItemData, updatedOrderData);
       } else if (row.entity_type === 'bills') {
         const billData = payload.bill || payload;
         await options.transport.syncBill(billData);

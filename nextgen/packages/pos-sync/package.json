@@ -11,7 +11,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "npx tsx --test tests/pos_pull.test.ts tests/pos_sync.test.ts tests/pos_sync_runtime.test.ts tests/pull_correctness.test.ts"
+    "test": "npx tsx --test tests/pos_pull.test.ts tests/pos_sync.test.ts tests/pos_sync_runtime.test.ts tests/pull_correctness.test.ts tests/pos_table_session_sync.test.ts tests/draft_order_sync_pull.test.ts tests/additional_kot_sync.test.ts tests/kot_correction_sync.test.ts"
   },
   "dependencies": {
     "@cheesyos/nextgen-shared": "file:../shared",

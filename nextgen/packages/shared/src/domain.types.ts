@@ -103,6 +103,7 @@ export interface OrderDomain {
   delivery_charge: MoneyAmount;
   grand_total: MoneyAmount;
   device_id?: string | null;
+  version?: number;
   created_at: string;
   updated_at: string;
 }
@@ -153,6 +154,7 @@ export interface PosKotDomain {
 export interface KotItemDomain {
   id: EntityId;
   kot_id: EntityId;
+  order_item_id?: EntityId | null;
   product_id: EntityId;
   variant_id?: EntityId | null;
   product_name: string;
@@ -160,15 +162,43 @@ export interface KotItemDomain {
   notes?: string | null;
 }
 
+export interface AppendOrderItemsAndKotParams {
+  order: OrderDomain;
+  newItems: OrderItemDomain[];
+  kot: PosKotDomain;
+  kotItems: KotItemDomain[];
+}
+
+export interface AppendOrderItemsAndKotResult {
+  order: OrderDomain;
+  newItems: OrderItemDomain[];
+  kot: PosKotDomain;
+  kotItems: KotItemDomain[];
+}
+
 export interface KotCorrectionDomain {
   id: EntityId;
   order_id: EntityId;
   kot_id?: EntityId | null;
+  kot_item_id?: EntityId | null;
+  order_item_id?: EntityId | null;
   product_name: string;
   cancelled_qty: number;
   reason: string;
   authorized_by_staff_id: EntityId;
   created_at: string;
+}
+
+export interface ApplyKotCorrectionParams {
+  correction: KotCorrectionDomain;
+  updatedOrderItem: OrderItemDomain;
+  updatedOrder: OrderDomain;
+}
+
+export interface ApplyKotCorrectionResult {
+  correction: KotCorrectionDomain;
+  updatedOrderItem: OrderItemDomain;
+  updatedOrder: OrderDomain;
 }
 
 export interface BillDomain {

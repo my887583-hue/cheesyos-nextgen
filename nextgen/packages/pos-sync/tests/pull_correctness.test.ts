@@ -9,9 +9,8 @@ import {
   setSyncCursor,
   hasPendingOutboxRecord,
   saveOrderTransaction,
-  OrderDomain,
-  OrderItemDomain,
 } from '@cheesyos/pos-local';
+import type { OrderDomain, OrderItemDomain } from '@cheesyos/nextgen-shared';
 import {
   runPullCycle,
   createSupabasePullTransport,
@@ -168,7 +167,7 @@ describe('CHEESYOS NEXTGEN — PHASE 3F.6A DELTA PULL CORRECTNESS SUITE', () => 
       assert.equal(res.rowsApplied, 0, `Cycle ${i}: pending first row must stop apply and yield 0 rows`);
 
       const cursor = dbManager.runTransaction(db => getSyncCursor(db, 'categories'));
-      assert.equal(cursor.lastTimestamp || cursor.lastUpdatedAt, '1970-01-01T00:00:00.000Z');
+      assert.equal(cursor.lastUpdatedAt, '1970-01-01T00:00:00.000Z');
       assert.equal(cursor.lastId, '00000000-0000-0000-0000-000000000000');
 
       // Verify no outbox echo created
@@ -432,7 +431,7 @@ describe('CHEESYOS NEXTGEN — PHASE 3F.6A DELTA PULL CORRECTNESS SUITE', () => 
 
     assert.equal(counts.orders, 0, 'Zero orders applied locally on partial child failure');
     assert.equal(counts.items, 0, 'Zero items applied locally on partial child failure');
-    assert.equal(counts.cursor.lastTimestamp || counts.cursor.lastUpdatedAt, '1970-01-01T00:00:00.000Z', 'CHILD_FETCH_FAILURE_CURSOR_ADVANCE must be NO');
+    assert.equal(counts.cursor.lastUpdatedAt, '1970-01-01T00:00:00.000Z', 'CHILD_FETCH_FAILURE_CURSOR_ADVANCE must be NO');
     assert.equal(counts.cursor.lastId, '00000000-0000-0000-0000-000000000000');
   });
 

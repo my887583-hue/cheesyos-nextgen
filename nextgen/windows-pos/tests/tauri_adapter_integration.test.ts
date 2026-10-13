@@ -17,6 +17,7 @@ import {
   TauriPosPersistence,
   TauriInvokeHandler,
   createTauriPosPersistence,
+  deriveTableOccupancy,
 } from '../src/tauri-adapter.js';
 import { runPushCycle, runPullCycle, CloudRpcTransport, CloudPullTransport } from '@cheesyos/pos-sync';
 import type {
@@ -42,6 +43,12 @@ function createHarnessMockInvoke() {
   let sequenceCounter = 0;
   const outbox: any[] = [];
   const cursors: Record<string, { lastUpdatedAt: string; lastId: string; updatedAt: string }> = {};
+
+  let mockTables: any[] = [];
+  let mockCatalog: any = { categories: [], products: [], variants: [] };
+  const mockActiveOrders: Record<string, any> = {};
+  const mockBills: Record<string, any> = {};
+  const mockKots: Record<string, any[]> = {};
 
   const invoke: TauriInvokeHandler = async (cmd: string, args?: Record<string, unknown>) => {
     recordedInvokes.push({ cmd, args });
@@ -77,6 +84,26 @@ function createHarnessMockInvoke() {
             operation: 'INSERT',
             payload_json: JSON.stringify(op.payload),
             created_at: op.payload.order.created_at,
+            attempt_count: 0,
+            next_attempt_at: null,
+            last_error: null,
+          };
+          outbox.push(outboxEntry);
+          return {
+            order: op.payload.order,
+            items: op.payload.items,
+            outbox_entries: [outboxEntry],
+          };
+        }
+        case 'ReplaceDraftOrderAggregate': {
+          const outboxEntry = {
+            seq: outbox.length + 1,
+            id: 'out-' + (outbox.length + 1),
+            entity_type: 'orders',
+            entity_id: op.payload.order.id,
+            operation: 'UPDATE',
+            payload_json: JSON.stringify(op.payload),
+            created_at: op.payload.order.updated_at,
             attempt_count: 0,
             next_attempt_at: null,
             last_error: null,
@@ -208,6 +235,20 @@ function createHarnessMockInvoke() {
             outbox_entry: outboxEntry,
           };
         }
+        case 'OpenTableSession': {
+          return {
+            id: 'sess-' + Math.random().toString(36).substring(2, 9),
+            table_id: op.payload.table_id,
+            current_order_id: null,
+            guest_count: op.payload.guest_count,
+            session_status: 'open',
+            opened_at: '2026-10-12T12:00:00Z',
+            closed_at: null,
+          };
+        }
+        case 'CloseTableSession': {
+          return { closed: true };
+        }
         case 'AcknowledgeOutbox': {
           const idx = outbox.findIndex((r) => r.seq === op.payload.seq);
           if (idx !== -1) outbox.splice(idx, 1);
@@ -257,6 +298,24 @@ function createHarnessMockInvoke() {
             updated_at: '1970-01-01T00:00:00.000Z',
           };
         }
+        case 'GetTablesWithSessions': {
+          return mockTables;
+        }
+        case 'GetCatalog': {
+          return mockCatalog;
+        }
+        case 'GetActiveOrderForTable': {
+          const tableId = q.payload?.table_id;
+          return mockActiveOrders[tableId] || null;
+        }
+        case 'GetBillForOrder': {
+          const orderId = q.payload?.order_id;
+          return mockBills[orderId] || null;
+        }
+        case 'GetKotsForOrder': {
+          const orderId = q.payload?.order_id;
+          return mockKots[orderId] || [];
+        }
         default:
           throw new Error(`UNKNOWN_QUERY: ${q.type}`);
       }
@@ -265,7 +324,16 @@ function createHarnessMockInvoke() {
     throw new Error(`UNKNOWN_COMMAND: ${cmd}`);
   };
 
-  return { invoke, recordedInvokes, outbox };
+  return {
+    invoke,
+    recordedInvokes,
+    outbox,
+    setMockTables: (t: any[]) => { mockTables = t; },
+    setMockCatalog: (c: any) => { mockCatalog = c; },
+    setMockActiveOrder: (tbl: string, o: any) => { mockActiveOrders[tbl] = o; },
+    setMockBill: (ord: string, b: any) => { mockBills[ord] = b; },
+    setMockKots: (ord: string, k: any[]) => { mockKots[ord] = k; },
+  };
 }
 
 describe('CHEESYOS WINDOWS POS — TAURI NATIVE PERSISTENCE INTEGRATION GATE', () => {
@@ -570,5 +638,339 @@ describe('CHEESYOS WINDOWS POS — TAURI NATIVE PERSISTENCE INTEGRATION GATE', (
         return true;
       }
     );
+  });
+
+  it('8. GET_TABLES_WITH_SESSIONS_AND_OCCUPANCY: Reads tables + sessions via IPC and derives AVAILABLE, OCCUPIED, BILLED', async () => {
+    const { invoke, recordedInvokes, setMockTables } = createHarnessMockInvoke();
+    const adapter = new TauriPosPersistence(invoke);
+
+    const mockData = [
+      {
+        table: { id: 'tbl-1', table_number: 'T01', section: 'Main', capacity: 4, is_active: true, created_at: 'now' },
+        active_session: { id: 'sess-1', table_id: 'tbl-1', current_order_id: 'ord-1', guest_count: 2, session_status: 'open', opened_at: 'now', closed_at: null },
+      },
+      {
+        table: { id: 'tbl-2', table_number: 'T02', section: 'Main', capacity: 2, is_active: true, created_at: 'now' },
+        active_session: { id: 'sess-2', table_id: 'tbl-2', current_order_id: 'ord-2', guest_count: 2, session_status: 'billed', opened_at: 'now', closed_at: null },
+      },
+      {
+        table: { id: 'tbl-3', table_number: 'T03', section: 'Main', capacity: 6, is_active: true, created_at: 'now' },
+        active_session: null,
+      },
+    ];
+    setMockTables(mockData);
+
+    const tables = await adapter.getTablesWithSessions();
+    assert.equal(tables.length, 3);
+
+    // Verify IPC call shape
+    const lastInvoke = recordedInvokes[recordedInvokes.length - 1];
+    assert.equal(lastInvoke.cmd, 'pos_db_query');
+    assert.deepEqual(lastInvoke.args, { query: { type: 'GetTablesWithSessions' } });
+
+    // Verify derivation
+    assert.equal(deriveTableOccupancy(tables[0].active_session), 'OCCUPIED');
+    assert.equal(deriveTableOccupancy(tables[1].active_session), 'BILLED');
+    assert.equal(deriveTableOccupancy(tables[2].active_session), 'AVAILABLE');
+  });
+
+  it('9. GET_CATALOG_PAISE_FIDELITY: Reads menu catalog via IPC preserving integer Paise', async () => {
+    const { invoke, recordedInvokes, setMockCatalog } = createHarnessMockInvoke();
+    const adapter = new TauriPosPersistence(invoke);
+
+    const mockCatalogData = {
+      categories: [{ id: 'c1', name: 'Drinks', slug: 'drinks', display_order: 1, is_active: true, created_at: 'now', updated_at: 'now' }],
+      products: [{ id: 'p1', category_id: 'c1', name: 'Coffee', description: null, image_url: null, base_price_paise: 12000, is_available: true, tax_rate: 5.0, is_inventory_tracked: false, created_at: 'now', updated_at: 'now' }],
+      variants: [{ id: 'v1', product_id: 'p1', variant_name: 'Large', price_override_paise: 15000, is_available: true, created_at: 'now' }],
+    };
+    setMockCatalog(mockCatalogData);
+
+    const catalog = await adapter.getCatalog();
+    assert.equal(catalog.categories.length, 1);
+    assert.equal(catalog.products.length, 1);
+    assert.equal(catalog.products[0].base_price_paise, 12000);
+    assert.equal(Number.isInteger(catalog.products[0].base_price_paise), true);
+    assert.equal(catalog.variants[0].price_override_paise, 15000);
+    assert.equal(Number.isInteger(catalog.variants[0].price_override_paise!), true);
+
+    const lastInvoke = recordedInvokes[recordedInvokes.length - 1];
+    assert.equal(lastInvoke.cmd, 'pos_db_query');
+    assert.deepEqual(lastInvoke.args, { query: { type: 'GetCatalog' } });
+  });
+
+  it('10. GET_ACTIVE_ORDER_FOR_TABLE_AND_TYPED_NULL: Hydrates table active order via IPC with typed null result', async () => {
+    const { invoke, recordedInvokes, setMockActiveOrder } = createHarnessMockInvoke();
+    const adapter = new TauriPosPersistence(invoke);
+
+    const mockActive = {
+      session: { id: 'sess-1', table_id: 'tbl-1', guest_count: 2, session_status: 'open' as const, opened_at: 'now' },
+      order: {
+        id: 'ord-1',
+        channel: 'POS' as const,
+        order_type: 'DINE_IN' as const,
+        status: 'kot_sent' as const,
+        subtotal_paise: 20000,
+        tax_total_paise: 1000,
+        discount_total_paise: 0,
+        delivery_charge_paise: 0,
+        grand_total_paise: 21000,
+        created_at: 'now',
+        updated_at: 'now',
+        display_number: 'CB-T01-001',
+        customer_id: null,
+        table_session_id: 'sess-1',
+        device_id: null,
+      },
+      items: [
+        { id: 'i1', order_id: 'ord-1', product_id: 'p1', variant_id: null, product_name: 'Coffee', unit_price_paise: 10000, quantity: 2, tax_rate: 5.0, discount_amount_paise: 0, line_total_paise: 20000, notes: null, created_at: 'now' },
+      ],
+    };
+    setMockActiveOrder('tbl-1', mockActive);
+
+    // 1. Populated active order
+    const result = await adapter.getActiveOrderForTable('tbl-1');
+    assert.ok(result);
+    assert.equal(result.session.id, 'sess-1');
+    assert.equal(result.order.id, 'ord-1');
+    assert.equal(result.order.grand_total_paise, 21000);
+    assert.equal(result.items.length, 1);
+
+    const lastInvoke = recordedInvokes[recordedInvokes.length - 1];
+    assert.equal(lastInvoke.cmd, 'pos_db_query');
+    assert.deepEqual(lastInvoke.args, {
+      query: {
+        type: 'GetActiveOrderForTable',
+        payload: { table_id: 'tbl-1' },
+      },
+    });
+
+    // 2. Empty table -> typed null
+    const emptyResult = await adapter.getActiveOrderForTable('tbl-empty');
+    assert.equal(emptyResult, null);
+  });
+
+  it('11. GET_BILL_FOR_ORDER_AND_TYPED_NULL: Reads order bill via IPC with typed null result', async () => {
+    const { invoke, recordedInvokes, setMockBill } = createHarnessMockInvoke();
+    const adapter = new TauriPosPersistence(invoke);
+
+    const mockBillData = {
+      id: 'b1',
+      order_id: 'ord-1',
+      bill_number: 'CB-T01-000001',
+      subtotal_paise: 20000,
+      cgst_total_paise: 500,
+      sgst_total_paise: 500,
+      discount_total_paise: 0,
+      grand_total_paise: 21000,
+      payment_status: 'unpaid' as const,
+      finalized_at: 'now',
+      device_id: null,
+    };
+    setMockBill('ord-1', mockBillData);
+
+    // 1. Existing bill
+    const bill = await adapter.getBillForOrder('ord-1');
+    assert.ok(bill);
+    assert.equal(bill.id, 'b1');
+    assert.equal(bill.bill_number, 'CB-T01-000001');
+    assert.equal(bill.grand_total_paise, 21000);
+
+    const lastInvoke = recordedInvokes[recordedInvokes.length - 1];
+    assert.equal(lastInvoke.cmd, 'pos_db_query');
+    assert.deepEqual(lastInvoke.args, {
+      query: {
+        type: 'GetBillForOrder',
+        payload: { order_id: 'ord-1' },
+      },
+    });
+
+    // 2. Missing bill -> typed null
+    const noBill = await adapter.getBillForOrder('ord-no-bill');
+    assert.equal(noBill, null);
+  });
+
+  it('12. RAW_SQL_CROSSES_IPC_STRICTLY_NO: TauriPosPersistence boundary exposes zero raw SQL methods and IPC rejects generic SQL', async () => {
+    const { invoke } = createHarnessMockInvoke();
+    const adapter = new TauriPosPersistence(invoke) as any;
+
+    // Verify zero generic SQL methods exist on adapter
+    assert.equal(adapter.querySql, undefined);
+    assert.equal(adapter.executeSql, undefined);
+    assert.equal(adapter.rawQuery, undefined);
+    assert.equal(adapter.rawSql, undefined);
+
+    // Verify unknown generic SQL query type is rejected
+    await assert.rejects(
+      async () => {
+        await invoke('pos_db_query', { query: { type: 'RawSql', payload: 'SELECT 1;' } });
+      },
+      /UNKNOWN_QUERY: RawSql/
+    );
+  });
+
+  it('13. OPEN_TABLE_SESSION_IPC_GATE: Dispatches OpenTableSession and notifies committed write', async () => {
+    const { invoke, recordedInvokes } = createHarnessMockInvoke();
+    const adapter = new TauriPosPersistence(invoke);
+
+    let committedEntity = '';
+    adapter.onCommittedWrite((entity) => {
+      committedEntity = entity;
+    });
+
+    const session = await adapter.openTableSession('tbl-1', 4);
+    assert.ok(session.id);
+    assert.equal(session.table_id, 'tbl-1');
+    assert.equal(session.guest_count, 4);
+    assert.equal(session.session_status, 'open');
+    assert.equal(committedEntity, 'table_sessions');
+
+    const lastInvoke = recordedInvokes[recordedInvokes.length - 1];
+    assert.equal(lastInvoke.cmd, 'pos_db_execute');
+    assert.deepEqual(lastInvoke.args, {
+      op: {
+        type: 'OpenTableSession',
+        payload: {
+          table_id: 'tbl-1',
+          guest_count: 4,
+        },
+      },
+    });
+  });
+
+  it('14. CLOSE_TABLE_SESSION_IPC_GATE: Dispatches CloseTableSession and notifies committed writes', async () => {
+    const { invoke, recordedInvokes } = createHarnessMockInvoke();
+    const adapter = new TauriPosPersistence(invoke);
+
+    const committedEntities: string[] = [];
+    adapter.onCommittedWrite((entity) => {
+      committedEntities.push(entity);
+    });
+
+    await adapter.closeTableSession('sess-1', 'ord-1');
+    assert.deepEqual(committedEntities, ['table_sessions', 'orders']);
+
+    const lastInvoke = recordedInvokes[recordedInvokes.length - 1];
+    assert.equal(lastInvoke.cmd, 'pos_db_execute');
+    assert.deepEqual(lastInvoke.args, {
+      op: {
+        type: 'CloseTableSession',
+        payload: {
+          session_id: 'sess-1',
+          order_id: 'ord-1',
+        },
+      },
+    });
+  });
+
+  it('15. REPLACE_DRAFT_ORDER_AGGREGATE_IPC_GATE: Dispatches ReplaceDraftOrderAggregate and notifies committed write', async () => {
+    const { invoke } = createHarnessMockInvoke();
+    const adapter = new TauriPosPersistence(invoke);
+
+    let notified = false;
+    adapter.onCommittedWrite((entity) => {
+      if (entity === 'orders') notified = true;
+    });
+
+    const res = await adapter.replaceDraftOrderAggregate(
+      {
+        id: 'ord-rep-1',
+        display_number: '1',
+        channel: 'POS',
+        order_type: 'DINE_IN',
+        table_session_id: 'sess-1',
+        status: 'draft',
+        version: 2,
+        subtotal: 300,
+        tax_total: 15,
+        discount_total: 0,
+        delivery_charge: 0,
+        grand_total: 315,
+        created_at: '2026-10-12T12:00:00Z',
+        updated_at: '2026-10-12T12:05:00Z',
+      },
+      [
+        {
+          id: 'item-1',
+          order_id: 'ord-rep-1',
+          product_id: 'p-1',
+          product_name: 'Margherita',
+          unit_price: 300,
+          quantity: 1,
+          tax_rate: 5,
+          discount_amount: 0,
+          line_total: 300,
+          created_at: '2026-10-12T12:05:00Z',
+        },
+      ]
+    );
+
+    assert.equal(res.order.version, 2);
+    assert.ok(notified);
+    assert.equal(res.outboxEntries[0].operation, 'UPDATE');
+  });
+
+  it('16. GET_KOTS_FOR_ORDER_IPC_GATE: Typed finite query dispatches GetKotsForOrder with zero raw SQL and returns exact history', async () => {
+    const { invoke, recordedInvokes, setMockKots } = createHarnessMockInvoke();
+    const adapter = new TauriPosPersistence(invoke);
+
+    const orderId = 'ord-kot-gate-1';
+    const mockData = [
+      {
+        kot: {
+          id: 'kot-gate-1',
+          order_id: orderId,
+          kot_number: 1,
+          device_id: 'dev-1',
+          status: 'printed',
+          printed_at: '2026-10-12T10:00:00Z',
+        },
+        items: [
+          {
+            id: 'kitem-1',
+            kot_id: 'kot-gate-1',
+            order_item_id: 'oitem-1',
+            product_id: 'prod-1',
+            variant_id: null,
+            product_name: 'Burger',
+            quantity: 2,
+            notes: null,
+          },
+          {
+            id: 'kitem-hist',
+            kot_id: 'kot-gate-1',
+            order_item_id: null,
+            product_id: 'prod-2',
+            variant_id: null,
+            product_name: 'Fries',
+            quantity: 1,
+            notes: null,
+          },
+        ],
+      },
+    ];
+
+    setMockKots(orderId, mockData);
+
+    // TAURI_ADAPTER_TYPED_QUERY_PASS
+    const res = await adapter.getKotsForOrder(orderId);
+    assert.equal(res.length, 1, 'TAURI_ADAPTER_TYPED_QUERY_PASS: returns 1 KOT');
+    assert.equal(res[0].kot.kot_number, 1);
+    assert.equal(res[0].items.length, 2);
+    assert.equal(res[0].items[0].order_item_id, 'oitem-1');
+    assert.strictEqual(res[0].items[1].order_item_id, null);
+
+    // NO_RAW_SQL_IPC_PASS
+    const lastInvoke = recordedInvokes[recordedInvokes.length - 1];
+    assert.equal(lastInvoke.cmd, 'pos_db_query', 'NO_RAW_SQL_IPC_PASS: command is pos_db_query');
+    assert.deepEqual(lastInvoke.args, {
+      query: {
+        type: 'GetKotsForOrder',
+        payload: { order_id: orderId },
+      },
+    }, 'NO_RAW_SQL_IPC_PASS: args match finite NativeQuery payload');
+
+    // Empty order returns empty array
+    const emptyRes = await adapter.getKotsForOrder('ord-non-existent');
+    assert.deepEqual(emptyRes, [], 'GET_KOTS_FOR_ORDER_EMPTY_PASS: returns empty array for non-existent order');
   });
 });

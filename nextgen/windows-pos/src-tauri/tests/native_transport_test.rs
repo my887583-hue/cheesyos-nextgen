@@ -137,19 +137,58 @@ fn test_valid_preparation_injects_credentials_and_locks_destination() {
 }
 
 #[test]
-fn test_all_six_finite_operations_map_to_exact_cloud_rpcs() {
+fn test_all_seven_finite_operations_map_to_exact_cloud_rpcs() {
     let ops = vec![
         (NativeRpcOperation::Order, "secure_sync_pos_order"),
         (NativeRpcOperation::Kot, "secure_sync_pos_kot"),
-        (NativeRpcOperation::KotCorrection, "secure_sync_kot_correction"),
+        (NativeRpcOperation::KotCorrection, "secure_save_kot_correction"),
         (NativeRpcOperation::Bill, "secure_sync_pos_bill"),
         (NativeRpcOperation::Payment, "secure_sync_pos_payment"),
         (NativeRpcOperation::InventoryMovement, "secure_apply_inventory_movement"),
+        (NativeRpcOperation::TableSession, "secure_sync_pos_table_session"),
     ];
 
     for (op, expected_rpc) in ops {
         assert_eq!(op.rpc_name(), expected_rpc);
     }
+}
+
+#[test]
+fn test_table_session_payload_injection() {
+    let conn = setup_test_db();
+
+    let dev_id = "550e8400-e29b-41d4-a716-446655440000";
+    let token = "cb_device_secret_token_12345678";
+    conn.execute(
+        "INSERT INTO pos_device_config (device_id, terminal_code, device_name, created_at)
+         VALUES (?1, 'T01', 'Counter POS', '2026-10-11T00:00:00Z');",
+        rusqlite::params![dev_id],
+    ).unwrap();
+    store_device_credential(&conn, dev_id, token).unwrap();
+
+    let req = NativeRpcRequest {
+        op: NativeRpcOperation::TableSession,
+        payload: serde_json::json!({
+            "session": {
+                "id": "sess-test-uuid",
+                "table_id": "tbl-test-uuid",
+                "session_status": "open",
+                "guest_count": 4,
+                "opened_at": "2026-10-12T10:00:00Z"
+            }
+        }),
+        staff_token: Some("staff_valid_jwt_abc".to_string()),
+    };
+
+    let call = prepare_rpc_call(&conn, &req, NEXTGEN_SUPABASE_PROJECT_URL).unwrap();
+
+    assert_eq!(call.url, "https://sdbnibyzqtgpbexlznat.supabase.co/rest/v1/rpc/secure_sync_pos_table_session");
+    assert_eq!(call.staff_token, "staff_valid_jwt_abc");
+    assert_eq!(call.body["p_device_id"], dev_id);
+    assert_eq!(call.body["p_device_token"], token);
+    assert_eq!(call.body["p_session"]["id"], "sess-test-uuid");
+    assert_eq!(call.body["p_session"]["table_id"], "tbl-test-uuid");
+    assert_eq!(call.body["p_session"]["session_status"], "open");
 }
 
 #[test]

@@ -5,7 +5,7 @@
  * Uses integer minor units (Paise) for all local monetary columns.
  */
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 4;
 
 export const INITIAL_SCHEMA_SQL = `
 PRAGMA foreign_keys = ON;
@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS orders (
   delivery_charge_paise INTEGER NOT NULL DEFAULT 0 CHECK (delivery_charge_paise >= 0),
   grand_total_paise INTEGER NOT NULL DEFAULT 0 CHECK (grand_total_paise >= 0),
   device_id TEXT,
+  version INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY (customer_id) REFERENCES customers(id),
@@ -112,7 +113,7 @@ CREATE TABLE IF NOT EXISTS order_items (
   variant_id TEXT,
   product_name TEXT NOT NULL,
   unit_price_paise INTEGER NOT NULL CHECK (unit_price_paise >= 0),
-  quantity INTEGER NOT NULL CHECK (quantity > 0),
+  quantity INTEGER NOT NULL CHECK (quantity >= 0),
   tax_rate REAL DEFAULT 5.00 CHECK (tax_rate >= 0),
   discount_amount_paise INTEGER DEFAULT 0 CHECK (discount_amount_paise >= 0),
   line_total_paise INTEGER NOT NULL CHECK (line_total_paise >= 0),
@@ -138,12 +139,14 @@ CREATE TABLE IF NOT EXISTS pos_kots (
 CREATE TABLE IF NOT EXISTS kot_items (
   id TEXT PRIMARY KEY,
   kot_id TEXT NOT NULL,
+  order_item_id TEXT,
   product_id TEXT NOT NULL,
   variant_id TEXT,
   product_name TEXT NOT NULL,
   quantity INTEGER NOT NULL CHECK (quantity > 0),
   notes TEXT,
   FOREIGN KEY (kot_id) REFERENCES pos_kots(id) ON DELETE CASCADE,
+  FOREIGN KEY (order_item_id) REFERENCES order_items(id),
   FOREIGN KEY (product_id) REFERENCES products(id),
   FOREIGN KEY (variant_id) REFERENCES product_variants(id)
 );
@@ -153,13 +156,17 @@ CREATE TABLE IF NOT EXISTS kot_corrections (
   id TEXT PRIMARY KEY,
   order_id TEXT NOT NULL,
   kot_id TEXT,
+  kot_item_id TEXT,
+  order_item_id TEXT,
   product_name TEXT NOT NULL,
   cancelled_qty INTEGER NOT NULL CHECK (cancelled_qty > 0),
   reason TEXT NOT NULL,
   authorized_by_staff_id TEXT NOT NULL,
   created_at TEXT NOT NULL,
   FOREIGN KEY (order_id) REFERENCES orders(id),
-  FOREIGN KEY (kot_id) REFERENCES pos_kots(id)
+  FOREIGN KEY (kot_id) REFERENCES pos_kots(id),
+  FOREIGN KEY (kot_item_id) REFERENCES kot_items(id),
+  FOREIGN KEY (order_item_id) REFERENCES order_items(id)
 );
 
 -- 12. BILLS (Fiscal Invoice Summary)

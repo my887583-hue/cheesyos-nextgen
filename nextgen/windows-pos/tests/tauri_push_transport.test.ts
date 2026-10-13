@@ -20,7 +20,7 @@ import { runPushCycle, PushSyncError } from '@cheesyos/pos-sync';
 
 describe('CHEESYOS NEXTGEN WINDOWS POS — TAURI NATIVE PUSH TRANSPORT', () => {
 
-  it('1. FINITE 6-RPC DISPATCH: Dispatches all six operations through native_pos_rpc', async () => {
+  it('1. FINITE 7-RPC DISPATCH: Dispatches all seven operations through native_pos_rpc', async () => {
     const invokedCalls: Array<{ cmd: string; args: any }> = [];
 
     const mockInvoke: TauriInvokeHandler = async (cmd, args) => {
@@ -31,27 +31,30 @@ describe('CHEESYOS NEXTGEN WINDOWS POS — TAURI NATIVE PUSH TRANSPORT', () => {
     const staffToken = 'ey.valid.staff.token';
     const transport = createTauriPushTransport(mockInvoke, () => staffToken);
 
-    // 1. Order
+    // 1. TableSession
+    await transport.syncTableSession({ id: 'sess-1', table_id: 'tbl-1', session_status: 'open' });
+    // 2. Order
     await transport.syncOrder({ id: 'ord-1' }, [{ id: 'item-1' }]);
-    // 2. Kot
+    // 3. Kot
     await transport.syncKot({ id: 'kot-1' }, [{ id: 'kitem-1' }]);
-    // 3. KotCorrection
+    // 4. KotCorrection
     await transport.syncKotCorrection({ id: 'cor-1' });
-    // 4. Bill
+    // 5. Bill
     await transport.syncBill({ id: 'bill-1' });
-    // 5. Payment
+    // 6. Payment
     await transport.syncPayment({ id: 'pay-1' });
-    // 6. InventoryMovement
+    // 7. InventoryMovement
     await transport.applyInventoryMovement({
       productId: 'prod-1',
       movementType: 'WASTE',
       quantityChange: -2,
     });
 
-    assert.equal(invokedCalls.length, 6);
+    assert.equal(invokedCalls.length, 7);
 
     const ops = invokedCalls.map((c) => c.args?.req?.op);
     assert.deepEqual(ops, [
+      'table_session',
       'order',
       'kot',
       'kot_correction',

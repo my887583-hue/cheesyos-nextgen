@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "npx tsx --test tests/tauri_adapter_integration.test.ts tests/runtime_lifecycle.test.ts tests/tauri_push_transport.test.ts tests/staff_auth_provisioning.test.ts"
+    "test": "npx tsx --test tests/tauri_adapter_integration.test.ts tests/runtime_lifecycle.test.ts tests/tauri_push_transport.test.ts tests/staff_auth_provisioning.test.ts tests/table_floor_ui.test.ts tests/order_workspace_ui.test.ts tests/cart_versioned_draft_order_ui.test.ts tests/send_kot_ui.test.ts tests/additional_kot_ui.test.ts tests/kot_correction_ui.test.ts tests/finalize_bill_ui.test.ts"
   },
   "dependencies": {
     "@cheesyos/nextgen-shared": "file:../packages/shared",

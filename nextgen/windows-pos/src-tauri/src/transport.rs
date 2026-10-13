@@ -49,6 +49,9 @@ pub enum NativeRpcOperation {
     Bill,
     Payment,
     InventoryMovement,
+    TableSession,
+    ReplaceDraftOrder,
+    AppendOrderItemsAndKot,
 }
 
 impl NativeRpcOperation {
@@ -56,10 +59,13 @@ impl NativeRpcOperation {
         match self {
             NativeRpcOperation::Order => "secure_sync_pos_order",
             NativeRpcOperation::Kot => "secure_sync_pos_kot",
-            NativeRpcOperation::KotCorrection => "secure_sync_kot_correction",
+            NativeRpcOperation::KotCorrection => "secure_save_kot_correction",
             NativeRpcOperation::Bill => "secure_sync_pos_bill",
             NativeRpcOperation::Payment => "secure_sync_pos_payment",
             NativeRpcOperation::InventoryMovement => "secure_apply_inventory_movement",
+            NativeRpcOperation::TableSession => "secure_sync_pos_table_session",
+            NativeRpcOperation::ReplaceDraftOrder => "secure_replace_pos_draft_order",
+            NativeRpcOperation::AppendOrderItemsAndKot => "secure_append_pos_order_items_and_kot",
         }
     }
 }
@@ -410,6 +416,26 @@ impl NativeRpcDispatcher {
                 body.insert("p_movement_id".to_string(), payload.get("movementId").or_else(|| payload.get("movement_id")).cloned().unwrap_or(serde_json::Value::Null));
                 body.insert("p_reference_movement_id".to_string(), payload.get("referenceMovementId").or_else(|| payload.get("reference_movement_id")).cloned().unwrap_or(serde_json::Value::Null));
             }
+            NativeRpcOperation::TableSession => {
+                let session = payload.get("session").cloned().unwrap_or_else(|| payload.clone());
+                body.insert("p_session".to_string(), session);
+            }
+            NativeRpcOperation::ReplaceDraftOrder => {
+                let order = payload.get("order").cloned().unwrap_or_else(|| payload.clone());
+                let items = payload.get("items").cloned().unwrap_or_else(|| serde_json::json!([]));
+                body.insert("p_order".to_string(), order);
+                body.insert("p_order_items".to_string(), items);
+            }
+            NativeRpcOperation::AppendOrderItemsAndKot => {
+                let order = payload.get("order").cloned().unwrap_or_else(|| payload.clone());
+                let order_items = payload.get("orderItems").or_else(|| payload.get("order_items")).cloned().unwrap_or_else(|| serde_json::json!([]));
+                let kot = payload.get("kot").cloned().unwrap_or_else(|| serde_json::json!({}));
+                let kot_items = payload.get("items").or_else(|| payload.get("kot_items")).cloned().unwrap_or_else(|| serde_json::json!([]));
+                body.insert("p_order".to_string(), order);
+                body.insert("p_order_items".to_string(), order_items);
+                body.insert("p_kot".to_string(), kot);
+                body.insert("p_kot_items".to_string(), kot_items);
+            }
         }
 
         Ok(serde_json::Value::Object(body))
@@ -432,7 +458,7 @@ impl NativeRpcDispatcher {
                 code: "AUTH_REQUIRED".to_string(),
                 message: msg,
             }
-        } else if msg.contains("CONTRACT_CONFLICT") || msg.contains("VALIDATION_ERROR") || msg.contains("Overpayment Denied") || status.as_u16() == 409 {
+        } else if msg.contains("CONTRACT_CONFLICT") || msg.contains("VALIDATION_ERROR") || msg.contains("IDEMPOTENCY_CONFLICT") || msg.contains("NUMBERING_CONFLICT") || msg.contains("Overpayment Denied") || msg.contains("VERSION_CONFLICT") || msg.contains("STALE_VERSION") || msg.contains("VERSION_GAP") || status.as_u16() == 409 {
             NativeRpcError {
                 code: "CONTRACT_CONFLICT".to_string(),
                 message: msg,

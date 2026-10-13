@@ -223,8 +223,8 @@ export function applyPullBatchLocal(
     }
   } else if (dataset === 'orders') {
     const orderStmt = db.prepare(`
-      INSERT INTO orders (id, display_number, channel, order_type, customer_id, table_session_id, status, subtotal_paise, tax_total_paise, discount_total_paise, delivery_charge_paise, grand_total_paise, device_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO orders (id, display_number, channel, order_type, customer_id, table_session_id, status, subtotal_paise, tax_total_paise, discount_total_paise, delivery_charge_paise, grand_total_paise, device_id, version, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         display_number = excluded.display_number,
         channel = excluded.channel,
@@ -238,6 +238,7 @@ export function applyPullBatchLocal(
         delivery_charge_paise = excluded.delivery_charge_paise,
         grand_total_paise = excluded.grand_total_paise,
         device_id = excluded.device_id,
+        version = excluded.version,
         created_at = excluded.created_at,
         updated_at = excluded.updated_at
     `);
@@ -283,6 +284,30 @@ export function applyPullBatchLocal(
         break;
       }
 
+      const incomingVersion = order.version ?? 1;
+      const localOrder = db.prepare('SELECT version, status FROM orders WHERE id = ?').get(order.id) as { version: number; status: string } | undefined;
+
+      // Version-Aware Pull Policy
+      if (localOrder) {
+        if (incomingVersion < localOrder.version) {
+          // Cloud version is older than local version: skip stale cloud aggregate
+          safeCursor = { lastUpdatedAt: toIsoString(order.updated_at), lastId: order.id };
+          continue;
+        }
+
+        // Newer cloud draft: complete draft item reconciliation
+        if (incomingVersion > localOrder.version && localOrder.status === 'draft' && (order.status || 'draft') === 'draft') {
+          const itemsForOrder = itemList.filter((item) => item.order_id === order.id);
+          const incomingItemIds = itemsForOrder.map((item) => item.id);
+          if (incomingItemIds.length > 0) {
+            const placeholders = incomingItemIds.map(() => '?').join(',');
+            db.prepare(`DELETE FROM order_items WHERE order_id = ? AND id NOT IN (${placeholders})`).run(order.id, ...incomingItemIds);
+          } else {
+            db.prepare(`DELETE FROM order_items WHERE order_id = ?`).run(order.id);
+          }
+        }
+      }
+
       orderStmt.run(
         order.id,
         order.display_number || null,
@@ -297,6 +322,7 @@ export function applyPullBatchLocal(
         toPaise(order.delivery_charge),
         toPaise(order.grand_total),
         order.device_id || null,
+        incomingVersion,
         toIsoString(order.created_at),
         toIsoString(order.updated_at)
       );
@@ -335,10 +361,11 @@ export function applyPullBatchLocal(
         printed_at = excluded.printed_at
     `);
     const itemStmt = db.prepare(`
-      INSERT INTO kot_items (id, kot_id, product_id, variant_id, product_name, quantity, notes)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO kot_items (id, kot_id, order_item_id, product_id, variant_id, product_name, quantity, notes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         kot_id = excluded.kot_id,
+        order_item_id = excluded.order_item_id,
         product_id = excluded.product_id,
         variant_id = excluded.variant_id,
         product_name = excluded.product_name,
@@ -387,6 +414,7 @@ export function applyPullBatchLocal(
         itemStmt.run(
           item.id,
           item.kot_id,
+          item.order_item_id || null,
           item.product_id,
           item.variant_id || null,
           item.product_name,
@@ -400,11 +428,13 @@ export function applyPullBatchLocal(
     }
   } else if (dataset === 'kot_corrections') {
     const stmt = db.prepare(`
-      INSERT INTO kot_corrections (id, order_id, kot_id, product_name, cancelled_qty, reason, authorized_by_staff_id, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO kot_corrections (id, order_id, kot_id, kot_item_id, order_item_id, product_name, cancelled_qty, reason, authorized_by_staff_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         order_id = excluded.order_id,
         kot_id = excluded.kot_id,
+        kot_item_id = excluded.kot_item_id,
+        order_item_id = excluded.order_item_id,
         product_name = excluded.product_name,
         cancelled_qty = excluded.cancelled_qty,
         reason = excluded.reason,
@@ -420,6 +450,8 @@ export function applyPullBatchLocal(
         row.id,
         row.order_id,
         row.kot_id || null,
+        row.kot_item_id || null,
+        row.order_item_id || null,
         row.product_name,
         row.cancelled_qty,
         row.reason,

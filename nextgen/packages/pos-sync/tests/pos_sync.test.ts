@@ -76,6 +76,7 @@ describe('CHEESYOS NEXTGEN POS PUSH SYNC SUITE', () => {
   function seedBill(billId: string, orderId: string) {
     seedOrder(orderId);
     dbManager.runTransaction(db => {
+      db.prepare(`UPDATE orders SET status = 'billed' WHERE id = ?`).run(orderId);
       db.prepare(`
         INSERT INTO bills (id, order_id, bill_number, subtotal_paise, cgst_total_paise, sgst_total_paise, discount_total_paise, grand_total_paise, payment_status, finalized_at)
         VALUES (?, ?, 'B-TEST', 1000, 25, 25, 0, 1050, 'unpaid', CURRENT_TIMESTAMP)
@@ -107,6 +108,10 @@ describe('CHEESYOS NEXTGEN POS PUSH SYNC SUITE', () => {
       async syncPayment(payment) {
         calls.push({ name: 'syncPayment', args: { payment } });
         return overrides?.syncPayment ? overrides.syncPayment(payment) : true;
+      },
+      async syncTableSession(session) {
+        calls.push({ name: 'syncTableSession', args: { session } });
+        return overrides?.syncTableSession ? overrides.syncTableSession(session) : true;
       },
       async applyInventoryMovement(input) {
         calls.push({ name: 'applyInventoryMovement', args: input });

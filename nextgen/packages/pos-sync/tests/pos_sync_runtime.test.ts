@@ -107,6 +107,11 @@ function createMockPushTransport(overrides: Partial<CloudRpcTransport> = {}): {
       pushCallCount++;
       if (overrides.applyInventoryMovement) return overrides.applyInventoryMovement(input);
       return true;
+    },
+    async syncTableSession(session) {
+      pushCallCount++;
+      if (overrides.syncTableSession) return overrides.syncTableSession(session);
+      return true;
     }
   };
 

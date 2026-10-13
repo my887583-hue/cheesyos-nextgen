@@ -13,7 +13,7 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 4;
 
 pub const INITIAL_SCHEMA_SQL: &str = "
 -- 1. CATEGORIES (Read-Only Cache for POS Menu)
@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS orders (
   delivery_charge_paise INTEGER NOT NULL DEFAULT 0 CHECK (delivery_charge_paise >= 0),
   grand_total_paise INTEGER NOT NULL DEFAULT 0 CHECK (grand_total_paise >= 0),
   device_id TEXT,
+  version INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY (customer_id) REFERENCES customers(id),
@@ -116,7 +117,7 @@ CREATE TABLE IF NOT EXISTS order_items (
   variant_id TEXT,
   product_name TEXT NOT NULL,
   unit_price_paise INTEGER NOT NULL CHECK (unit_price_paise >= 0),
-  quantity INTEGER NOT NULL CHECK (quantity > 0),
+  quantity INTEGER NOT NULL CHECK (quantity >= 0),
   tax_rate REAL DEFAULT 5.00 CHECK (tax_rate >= 0),
   discount_amount_paise INTEGER DEFAULT 0 CHECK (discount_amount_paise >= 0),
   line_total_paise INTEGER NOT NULL CHECK (line_total_paise >= 0),
@@ -142,12 +143,14 @@ CREATE TABLE IF NOT EXISTS pos_kots (
 CREATE TABLE IF NOT EXISTS kot_items (
   id TEXT PRIMARY KEY,
   kot_id TEXT NOT NULL,
+  order_item_id TEXT,
   product_id TEXT NOT NULL,
   variant_id TEXT,
   product_name TEXT NOT NULL,
   quantity INTEGER NOT NULL CHECK (quantity > 0),
   notes TEXT,
   FOREIGN KEY (kot_id) REFERENCES pos_kots(id) ON DELETE CASCADE,
+  FOREIGN KEY (order_item_id) REFERENCES order_items(id),
   FOREIGN KEY (product_id) REFERENCES products(id),
   FOREIGN KEY (variant_id) REFERENCES product_variants(id)
 );
@@ -157,13 +160,17 @@ CREATE TABLE IF NOT EXISTS kot_corrections (
   id TEXT PRIMARY KEY,
   order_id TEXT NOT NULL,
   kot_id TEXT,
+  kot_item_id TEXT,
+  order_item_id TEXT,
   product_name TEXT NOT NULL,
   cancelled_qty INTEGER NOT NULL CHECK (cancelled_qty > 0),
   reason TEXT NOT NULL,
   authorized_by_staff_id TEXT NOT NULL,
   created_at TEXT NOT NULL,
   FOREIGN KEY (order_id) REFERENCES orders(id),
-  FOREIGN KEY (kot_id) REFERENCES pos_kots(id)
+  FOREIGN KEY (kot_id) REFERENCES pos_kots(id),
+  FOREIGN KEY (kot_item_id) REFERENCES kot_items(id),
+  FOREIGN KEY (order_item_id) REFERENCES order_items(id)
 );
 
 -- 12. BILLS (Fiscal Invoice Summary)
@@ -276,7 +283,7 @@ pub struct SetDeviceConfigInput {
     pub created_at: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct OrderDomain {
     pub id: String,
     pub display_number: Option<String>,
@@ -291,11 +298,12 @@ pub struct OrderDomain {
     pub delivery_charge_paise: i64,
     pub grand_total_paise: i64,
     pub device_id: Option<String>,
+    pub version: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct OrderItemDomain {
     pub id: String,
     pub order_id: String,
@@ -325,6 +333,7 @@ pub struct PosKotDomain {
 pub struct KotItemDomain {
     pub id: String,
     pub kot_id: String,
+    pub order_item_id: Option<String>,
     pub product_id: String,
     pub variant_id: Option<String>,
     pub product_name: String,
@@ -333,10 +342,18 @@ pub struct KotItemDomain {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OrderKotHeaderWithItems {
+    pub kot: PosKotDomain,
+    pub items: Vec<KotItemDomain>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct KotCorrectionDomain {
     pub id: String,
     pub order_id: String,
     pub kot_id: Option<String>,
+    pub kot_item_id: Option<String>,
+    pub order_item_id: Option<String>,
     pub product_name: String,
     pub cancelled_qty: i64,
     pub reason: String,
@@ -345,6 +362,14 @@ pub struct KotCorrectionDomain {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ApplyKotCorrectionResult {
+    pub correction: KotCorrectionDomain,
+    pub updated_order_item: OrderItemDomain,
+    pub updated_order: OrderDomain,
+    pub outbox_entries: Vec<OutboxRow>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct BillDomain {
     pub id: String,
     pub order_id: String,
@@ -402,6 +427,83 @@ pub struct SyncCursor {
     pub last_updated_at: String,
     pub last_id: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct PosTableDomain {
+    pub id: String,
+    pub table_number: String,
+    pub section: String,
+    pub capacity: i64,
+    pub is_active: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct TableSessionDomain {
+    pub id: String,
+    pub table_id: String,
+    pub current_order_id: Option<String>,
+    pub guest_count: i64,
+    pub session_status: String,
+    pub opened_at: String,
+    pub closed_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct TableWithActiveSession {
+    pub table: PosTableDomain,
+    pub active_session: Option<TableSessionDomain>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct CategoryCatalogDomain {
+    pub id: String,
+    pub name: String,
+    pub slug: String,
+    pub display_order: i64,
+    pub is_active: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct ProductCatalogDomain {
+    pub id: String,
+    pub category_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub image_url: Option<String>,
+    pub base_price_paise: i64,
+    pub is_available: bool,
+    pub tax_rate: f64,
+    pub is_inventory_tracked: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct ProductVariantCatalogDomain {
+    pub id: String,
+    pub product_id: String,
+    pub variant_name: String,
+    pub price_override_paise: Option<i64>,
+    pub is_available: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct PosCatalog {
+    pub categories: Vec<CategoryCatalogDomain>,
+    pub products: Vec<ProductCatalogDomain>,
+    pub variants: Vec<ProductVariantCatalogDomain>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct ActiveTableOrderResult {
+    pub session: TableSessionDomain,
+    pub order: OrderDomain,
+    pub items: Vec<OrderItemDomain>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -474,6 +576,15 @@ pub struct SaveKotResult {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct AppendOrderItemsAndKotResult {
+    pub order: OrderDomain,
+    pub new_items: Vec<OrderItemDomain>,
+    pub kot: PosKotDomain,
+    pub kot_items: Vec<KotItemDomain>,
+    pub outbox_entries: Vec<OutboxRow>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SaveBillWithSequenceResult {
     pub bill: BillDomain,
     pub sequence_number: i64,
@@ -505,17 +616,40 @@ pub enum NativeMutation {
         order: OrderDomain,
         items: Vec<OrderItemDomain>,
     },
+    ReplaceDraftOrderAggregate {
+        order: OrderDomain,
+        items: Vec<OrderItemDomain>,
+    },
     SaveKotAggregate {
         kot: PosKotDomain,
         items: Vec<KotItemDomain>,
     },
+    AppendOrderItemsAndKot {
+        order: OrderDomain,
+        new_items: Vec<OrderItemDomain>,
+        kot: PosKotDomain,
+        kot_items: Vec<KotItemDomain>,
+    },
     SaveKotCorrection(KotCorrectionDomain),
+    ApplyKotCorrection {
+        correction: KotCorrectionDomain,
+        updated_order_item: OrderItemDomain,
+        updated_order: OrderDomain,
+    },
     SaveBillWithSequence(BillDomain),
     SavePayment {
         payment: PaymentDomain,
         updated_bill: BillDomain,
     },
     SaveInventoryMovement(SaveInventoryMovementInput),
+    OpenTableSession {
+        table_id: String,
+        guest_count: i64,
+    },
+    CloseTableSession {
+        session_id: String,
+        order_id: String,
+    },
     AcknowledgeOutbox {
         seq: i64,
     },
@@ -533,6 +667,11 @@ pub enum NativeQuery {
     GetDeviceConfig,
     GetPendingOutbox { limit: Option<i64> },
     GetSyncCursor { dataset: PullDataset },
+    GetTablesWithSessions,
+    GetCatalog,
+    GetActiveOrderForTable { table_id: String },
+    GetBillForOrder { order_id: String },
+    GetKotsForOrder { order_id: String },
 }
 
 // --- Helpers ---
@@ -554,9 +693,17 @@ fn generate_uuid(conn: &Connection) -> String {
     ).unwrap_or_else(|_| format!("id-{}", now_iso()))
 }
 
-fn has_pending_outbox_record(conn: &Connection, entity_id: &str) -> Result<bool, rusqlite::Error> {
-    let mut stmt = conn.prepare_cached("SELECT 1 FROM sync_outbox WHERE entity_id = ? LIMIT 1;")?;
-    let exists = stmt.exists([entity_id])?;
+pub fn has_pending_outbox_record(conn: &Connection, entity_id: &str) -> Result<bool, rusqlite::Error> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT 1 FROM sync_outbox
+         WHERE entity_id = ?
+            OR json_extract(payload_json, '$.kot.order_id') = ?
+            OR json_extract(payload_json, '$.order.id') = ?
+            OR json_extract(payload_json, '$.correction.order_id') = ?
+            OR json_extract(payload_json, '$.updatedOrderItem.id') = ?
+         LIMIT 1;",
+    )?;
+    let exists = stmt.exists(params![entity_id, entity_id, entity_id, entity_id, entity_id])?;
     Ok(exists)
 }
 
@@ -642,8 +789,147 @@ pub fn open_database_at_path(db_path: &std::path::Path) -> Result<Connection, St
 
 pub fn init_database(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
+    let user_version: i32 = conn.query_row("PRAGMA user_version;", [], |row| row.get(0)).unwrap_or(0);
     conn.execute_batch(INITIAL_SCHEMA_SQL)?;
-    conn.execute_batch("PRAGMA user_version = 2;")?;
+    if user_version < 3 {
+        let has_version_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('orders') WHERE name = 'version';",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+
+        if !has_version_col {
+            let has_orders: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='orders';",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
+
+            if has_orders {
+                conn.execute_batch("ALTER TABLE orders ADD COLUMN version INTEGER NOT NULL DEFAULT 1;")?;
+            }
+        }
+        conn.execute_batch("PRAGMA user_version = 3;")?;
+    }
+    if user_version < 4 {
+        let has_order_items: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='order_items';",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+
+        if has_order_items {
+            let has_notes: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('order_items') WHERE name='notes';",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
+
+            let notes_col = if has_notes { "notes" } else { "NULL as notes" };
+            let sql = format!(
+                "PRAGMA foreign_keys = OFF;
+                 CREATE TABLE IF NOT EXISTS order_items_v4 (
+                     id TEXT PRIMARY KEY,
+                     order_id TEXT NOT NULL,
+                     product_id TEXT NOT NULL,
+                     variant_id TEXT,
+                     product_name TEXT NOT NULL,
+                     unit_price_paise INTEGER NOT NULL CHECK (unit_price_paise >= 0),
+                     quantity INTEGER NOT NULL CHECK (quantity >= 0),
+                     tax_rate REAL DEFAULT 5.00 CHECK (tax_rate >= 0),
+                     discount_amount_paise INTEGER DEFAULT 0 CHECK (discount_amount_paise >= 0),
+                     line_total_paise INTEGER NOT NULL CHECK (line_total_paise >= 0),
+                     notes TEXT,
+                     created_at TEXT NOT NULL,
+                     FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE,
+                     FOREIGN KEY (product_id) REFERENCES products(id),
+                     FOREIGN KEY (variant_id) REFERENCES product_variants(id)
+                 );
+                 INSERT INTO order_items_v4 (id, order_id, product_id, variant_id, product_name, unit_price_paise, quantity, tax_rate, discount_amount_paise, line_total_paise, notes, created_at)
+                   SELECT id, order_id, product_id, variant_id, product_name, unit_price_paise, quantity, tax_rate, discount_amount_paise, line_total_paise, {}, created_at FROM order_items;
+                 DROP TABLE order_items;
+                 ALTER TABLE order_items_v4 RENAME TO order_items;
+                 PRAGMA foreign_keys = ON;",
+                notes_col
+            );
+            conn.execute_batch(&sql)?;
+        }
+
+        let has_kot_items: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='kot_items';",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+
+        if has_kot_items {
+            let has_order_item_id: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('kot_items') WHERE name = 'order_item_id';",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
+
+            if !has_order_item_id {
+                conn.execute_batch("ALTER TABLE kot_items ADD COLUMN order_item_id TEXT REFERENCES order_items(id);")?;
+            }
+        }
+
+        let has_corrections: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='kot_corrections';",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+
+        if has_corrections {
+            let has_kot_item_id: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('kot_corrections') WHERE name = 'kot_item_id';",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
+
+            if !has_kot_item_id {
+                conn.execute_batch("ALTER TABLE kot_corrections ADD COLUMN kot_item_id TEXT REFERENCES kot_items(id);")?;
+            }
+
+            let has_corr_order_item_id: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('kot_corrections') WHERE name = 'order_item_id';",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map(|c| c > 0)
+                .unwrap_or(false);
+
+            if !has_corr_order_item_id {
+                conn.execute_batch("ALTER TABLE kot_corrections ADD COLUMN order_item_id TEXT REFERENCES order_items(id);")?;
+            }
+        }
+
+        conn.execute_batch("PRAGMA user_version = 4;")?;
+    }
     Ok(())
 }
 
@@ -702,18 +988,66 @@ pub fn set_device_config(
 
 pub fn save_order_aggregate(
     conn: &mut Connection,
-    order: OrderDomain,
+    mut order: OrderDomain,
     items: Vec<OrderItemDomain>,
 ) -> Result<SaveOrderResult, String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    // Validate table session and guard active order if dine-in
+    if let Some(ref session_id) = order.table_session_id {
+        let session_opt: Option<(String, Option<String>)> = tx
+            .query_row(
+                "SELECT session_status, current_order_id FROM table_sessions WHERE id = ?;",
+                params![session_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+
+        match session_opt {
+            None => {
+                return Err(format!(
+                    "[PosPersistence] SESSION_NOT_FOUND: Table session {} does not exist",
+                    session_id
+                ));
+            }
+            Some((status, _curr_order_id)) => {
+                if status != "open" {
+                    return Err(format!(
+                        "[PosPersistence] SESSION_NOT_ACTIVE: Table session {} has status '{}', ordering not permitted",
+                        session_id, status
+                    ));
+                }
+            }
+        }
+
+        let existing_active: Option<String> = tx
+            .query_row(
+                "SELECT id FROM orders WHERE table_session_id = ? AND id != ? AND status NOT IN ('cancelled', 'closed') LIMIT 1;",
+                params![session_id, order.id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+
+        if let Some(active_id) = existing_active {
+            return Err(format!(
+                "[PosPersistence] ACTIVE_ORDER_EXISTS: Table session {} already has an active order ({})",
+                session_id, active_id
+            ));
+        }
+    }
+
+    let version = order.version.unwrap_or(1);
+    order.version = Some(version);
 
     // 1. Insert order header
     tx.execute(
         "INSERT INTO orders (
             id, display_number, channel, order_type, customer_id, table_session_id,
             status, subtotal_paise, tax_total_paise, discount_total_paise,
-            delivery_charge_paise, grand_total_paise, device_id, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            delivery_charge_paise, grand_total_paise, device_id, version, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         params![
             order.id,
             order.display_number,
@@ -728,6 +1062,7 @@ pub fn save_order_aggregate(
             order.delivery_charge_paise,
             order.grand_total_paise,
             order.device_id,
+            version,
             order.created_at,
             order.updated_at,
         ],
@@ -765,10 +1100,20 @@ pub fn save_order_aggregate(
         }
     }
 
-    // 3. Outbox insertion
+    // 3. Atomically update table_sessions.current_order_id if dine-in
+    if let Some(ref session_id) = order.table_session_id {
+        tx.execute(
+            "UPDATE table_sessions SET current_order_id = ? WHERE id = ?;",
+            params![order.id, session_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    // 4. Outbox insertion
     let payload = serde_json::json!({
         "order": order,
         "items": items,
+        "version": version,
     });
     let outbox_row = insert_outbox_record(
         &tx,
@@ -789,12 +1134,222 @@ pub fn save_order_aggregate(
     })
 }
 
+pub fn replace_draft_order_aggregate(
+    conn: &mut Connection,
+    mut order: OrderDomain,
+    items: Vec<OrderItemDomain>,
+) -> Result<SaveOrderResult, String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    // 1. Authoritative check on existing order
+    let existing: Option<(Option<String>, String, i64)> = tx
+        .query_row(
+            "SELECT table_session_id, status, version FROM orders WHERE id = ?;",
+            params![order.id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+
+    let (existing_session_id, existing_status, existing_version) = match existing {
+        Some(row) => row,
+        None => {
+            return Err(format!(
+                "[PosPersistence] ORDER_NOT_FOUND: Cannot replace draft for non-existent order {}",
+                order.id
+            ));
+        }
+    };
+
+    // 2. Eligibility checks: ONLY draft status
+    if existing_status != "draft" {
+        return Err(format!(
+            "[PosPersistence] ORDER_NOT_EDITABLE: Order {} has status '{}', only 'draft' status may be replaced",
+            order.id, existing_status
+        ));
+    }
+
+    // 3. KOT Boundary Check
+    let existing_kot: Option<String> = tx
+        .query_row(
+            "SELECT id FROM pos_kots WHERE order_id = ? LIMIT 1;",
+            params![order.id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+
+    if existing_kot.is_some() {
+        return Err(format!(
+            "[PosPersistence] KOT_ALREADY_SENT: Order {} already has dispatched KOTs, draft replacement prohibited",
+            order.id
+        ));
+    }
+
+    // 4. Session identity stability
+    if existing_session_id != order.table_session_id {
+        return Err(format!(
+            "[PosPersistence] SESSION_MISMATCH: Order {} table_session_id cannot be changed during draft replacement",
+            order.id
+        ));
+    }
+
+    // 5. Version Rules: exactly existing_version + 1
+    let expected_version = existing_version + 1;
+    let incoming_version = order.version.unwrap_or(expected_version);
+
+    if incoming_version != expected_version {
+        if incoming_version <= existing_version {
+            return Err(format!(
+                "[PosPersistence] STALE_VERSION: Incoming version {} <= current version {}",
+                incoming_version, existing_version
+            ));
+        } else {
+            return Err(format!(
+                "[PosPersistence] VERSION_GAP: Incoming version {} skips expected version {}",
+                incoming_version, expected_version
+            ));
+        }
+    }
+
+    if items.is_empty() {
+        return Err(format!(
+            "[PosPersistence] EMPTY_ITEMS: Order draft aggregate must contain at least one order item"
+        ));
+    }
+
+    let now = if !order.updated_at.is_empty() {
+        order.updated_at.clone()
+    } else {
+        now_iso()
+    };
+    order.version = Some(incoming_version);
+    order.updated_at = now.clone();
+
+    // 6. Delete old draft items
+    tx.execute("DELETE FROM order_items WHERE order_id = ?;", params![order.id])
+        .map_err(|e| e.to_string())?;
+
+    // 7. Insert replacement items
+    {
+        let mut item_stmt = tx
+            .prepare_cached(
+                "INSERT INTO order_items (
+                    id, order_id, product_id, variant_id, product_name, unit_price_paise,
+                    quantity, tax_rate, discount_amount_paise, line_total_paise, notes, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            )
+            .map_err(|e| e.to_string())?;
+
+        for item in &items {
+            item_stmt
+                .execute(params![
+                    item.id,
+                    order.id,
+                    item.product_id,
+                    item.variant_id,
+                    item.product_name,
+                    item.unit_price_paise,
+                    item.quantity,
+                    item.tax_rate,
+                    item.discount_amount_paise,
+                    item.line_total_paise,
+                    item.notes,
+                    if !item.created_at.is_empty() { &item.created_at } else { &now },
+                ])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    // 8. Update Order Financial Header and Version
+    tx.execute(
+        "UPDATE orders SET
+            subtotal_paise = ?,
+            tax_total_paise = ?,
+            discount_total_paise = ?,
+            delivery_charge_paise = ?,
+            grand_total_paise = ?,
+            version = ?,
+            updated_at = ?
+        WHERE id = ?;",
+        params![
+            order.subtotal_paise,
+            order.tax_total_paise,
+            order.discount_total_paise,
+            order.delivery_charge_paise,
+            order.grand_total_paise,
+            incoming_version,
+            now,
+            order.id,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+
+    // 9. Emit durable UPDATE outbox entry in the SAME transaction
+    let payload = serde_json::json!({
+        "order": order,
+        "items": items,
+        "version": incoming_version,
+    });
+    let outbox_row = insert_outbox_record(
+        &tx,
+        "orders",
+        &order.id,
+        "UPDATE",
+        &payload,
+        &now,
+    )
+    .map_err(|e| e.to_string())?;
+
+    tx.commit().map_err(|e| e.to_string())?;
+
+    Ok(SaveOrderResult {
+        order,
+        items,
+        outbox_entries: vec![outbox_row],
+    })
+}
+
 pub fn save_kot_aggregate(
     conn: &mut Connection,
     kot: PosKotDomain,
     items: Vec<KotItemDomain>,
 ) -> Result<SaveKotResult, String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    // 0. Verify and advance order status atomically
+    let order_status: String = tx
+        .query_row(
+            "SELECT status FROM orders WHERE id = ?;",
+            params![kot.order_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| {
+            format!(
+                "[PosPersistence] ORDER_NOT_FOUND: Order {} does not exist for KOT dispatch",
+                kot.order_id
+            )
+        })?;
+
+    if order_status == "cancelled" || order_status == "closed" {
+        return Err(format!(
+            "[PosPersistence] ORDER_STATUS_INVALID: Cannot dispatch KOT for order {} with status '{}'",
+            kot.order_id, order_status
+        ));
+    }
+    if order_status == "billed" || order_status == "settled" {
+        return Err(format!(
+            "[PosPersistence] ORDER_STATUS_REGRESSION: Cannot dispatch KOT for order {} already in status '{}'",
+            kot.order_id, order_status
+        ));
+    }
+
+    let now = now_iso();
+    tx.execute(
+        "UPDATE orders SET status = 'kot_sent', updated_at = ? WHERE id = ?;",
+        params![now, kot.order_id],
+    )
+    .map_err(|e| e.to_string())?;
 
     // 1. Insert KOT header
     tx.execute(
@@ -815,8 +1370,8 @@ pub fn save_kot_aggregate(
     {
         let mut item_stmt = tx
             .prepare_cached(
-                "INSERT INTO kot_items (id, kot_id, product_id, variant_id, product_name, quantity, notes)
-                 VALUES (?, ?, ?, ?, ?, ?, ?);",
+                "INSERT INTO kot_items (id, kot_id, order_item_id, product_id, variant_id, product_name, quantity, notes)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
             )
             .map_err(|e| e.to_string())?;
 
@@ -825,6 +1380,7 @@ pub fn save_kot_aggregate(
                 .execute(params![
                     item.id,
                     item.kot_id,
+                    item.order_item_id,
                     item.product_id,
                     item.variant_id,
                     item.product_name,
@@ -859,6 +1415,379 @@ pub fn save_kot_aggregate(
     })
 }
 
+pub fn append_order_items_and_kot(
+    conn: &mut Connection,
+    mut order: OrderDomain,
+    new_items: Vec<OrderItemDomain>,
+    mut kot: PosKotDomain,
+    kot_items: Vec<KotItemDomain>,
+) -> Result<AppendOrderItemsAndKotResult, String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    // 1. Authoritative existing order
+    let (
+        existing_status,
+        existing_session_id,
+        existing_version,
+        existing_subtotal_paise,
+        existing_tax_total_paise,
+        existing_discount_total_paise,
+        existing_delivery_charge_paise,
+        existing_grand_total_paise,
+    ): (String, Option<String>, i64, i64, i64, i64, i64, i64) = tx
+        .query_row(
+            "SELECT status, table_session_id, version,
+                    subtotal_paise, tax_total_paise, discount_total_paise, delivery_charge_paise, grand_total_paise
+             FROM orders WHERE id = ?;",
+            params![order.id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
+        )
+        .map_err(|_| {
+            format!(
+                "[PosPersistence] ORDER_NOT_FOUND: Order {} does not exist for additional KOT",
+                order.id
+            )
+        })?;
+
+    // 2. Status Guard: ONLY 'kot_sent' allowed
+    if existing_status != "kot_sent" {
+        return Err(format!(
+            "[PosPersistence] ORDER_STATUS_INVALID: Order {} has status '{}', only 'kot_sent' orders can receive additional items and KOT",
+            order.id, existing_status
+        ));
+    }
+
+    // 3. Active Session Guard
+    if let Some(ref session_id) = existing_session_id {
+        let session_status: Option<String> = tx
+            .query_row(
+                "SELECT session_status FROM table_sessions WHERE id = ?;",
+                params![session_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if session_status.as_deref() != Some("open") {
+            return Err(format!(
+                "[PosPersistence] SESSION_NOT_ACTIVE: Table session {} has status '{:?}', must be 'open'",
+                session_id, session_status
+            ));
+        }
+    }
+
+    // 4. Non-empty guards
+    if new_items.is_empty() {
+        return Err("[PosPersistence] EMPTY_ITEMS: Additional KOT requires at least one new order item".to_string());
+    }
+    if kot_items.is_empty() {
+        return Err("[PosPersistence] EMPTY_KOT_ITEMS: Additional KOT requires at least one KOT item".to_string());
+    }
+
+    // 5. Operation Idempotency Check (Operation ID = kot.id)
+    let existing_kot: Option<(String, i64, String)> = tx
+        .query_row(
+            "SELECT order_id, kot_number, printed_at FROM pos_kots WHERE id = ?;",
+            params![kot.id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+
+    if let Some((existing_order_id, existing_kot_number, existing_printed_at)) = existing_kot {
+        if existing_order_id != order.id {
+            return Err(format!(
+                "[PosPersistence] IDEMPOTENCY_CONFLICT: KOT ID {} belongs to order {}, cannot replay on order {}",
+                kot.id, existing_order_id, order.id
+            ));
+        }
+
+        if existing_kot_number != kot.kot_number {
+            return Err(format!(
+                "[PosPersistence] IDEMPOTENCY_CONFLICT: KOT ID {} has kot_number {}, retry payload has {}",
+                kot.id, existing_kot_number, kot.kot_number
+            ));
+        }
+
+        // Verify cumulative order financial header
+        if existing_subtotal_paise != order.subtotal_paise
+            || existing_tax_total_paise != order.tax_total_paise
+            || existing_discount_total_paise != order.discount_total_paise
+            || existing_delivery_charge_paise != order.delivery_charge_paise
+            || existing_grand_total_paise != order.grand_total_paise
+        {
+            return Err(format!(
+                "[PosPersistence] IDEMPOTENCY_CONFLICT: Order {} financial totals mismatch on retry for KOT ID {}",
+                order.id, kot.id
+            ));
+        }
+
+        if let (Some(ref inc_sess), Some(ref ex_sess)) = (&order.table_session_id, &existing_session_id) {
+            if inc_sess != ex_sess {
+                return Err(format!(
+                    "[PosPersistence] IDEMPOTENCY_CONFLICT: Order {} table session mismatch on retry for KOT ID {}",
+                    order.id, kot.id
+                ));
+            }
+        }
+
+        let existing_ki_count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM kot_items WHERE kot_id = ?;",
+                params![kot.id],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+
+        if existing_ki_count != kot_items.len() as i64 {
+            return Err(format!(
+                "[PosPersistence] IDEMPOTENCY_CONFLICT: KOT ID {} item count mismatch on retry",
+                kot.id
+            ));
+        }
+
+        for ki in &kot_items {
+            let matched: Option<(Option<String>, String, Option<String>, String, i64, Option<String>)> = tx
+                .query_row(
+                    "SELECT order_item_id, product_id, variant_id, product_name, quantity, notes FROM kot_items WHERE id = ? AND kot_id = ?;",
+                    params![ki.id, kot.id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+
+            match matched {
+                Some((ord_item_id, prod_id, var_id, prod_name, qty, notes)) => {
+                    if ord_item_id != ki.order_item_id
+                        || prod_id != ki.product_id
+                        || var_id != ki.variant_id
+                        || prod_name != ki.product_name
+                        || qty != ki.quantity
+                        || notes != ki.notes
+                    {
+                        return Err(format!(
+                            "[PosPersistence] IDEMPOTENCY_CONFLICT: KOT item {} mismatched on retry for KOT ID {}",
+                            ki.id, kot.id
+                        ));
+                    }
+                }
+                None => {
+                    return Err(format!(
+                        "[PosPersistence] IDEMPOTENCY_CONFLICT: KOT item {} missing on retry for KOT ID {}",
+                        ki.id, kot.id
+                    ));
+                }
+            }
+        }
+
+        for oi in &new_items {
+            let in_db: Option<(String, Option<String>, i64, i64, f64, i64, i64)> = tx
+                .query_row(
+                    "SELECT product_id, variant_id, unit_price_paise, quantity, tax_rate, discount_amount_paise, line_total_paise
+                     FROM order_items WHERE id = ? AND order_id = ?;",
+                    params![oi.id, order.id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?;
+
+            match in_db {
+                Some((prod_id, var_id, price, qty, tax, disc, total)) => {
+                    let tax_diff = (tax - oi.tax_rate).abs();
+                    if prod_id != oi.product_id
+                        || var_id != oi.variant_id
+                        || price != oi.unit_price_paise
+                        || qty != oi.quantity
+                        || tax_diff > 0.001
+                        || disc != oi.discount_amount_paise
+                        || total != oi.line_total_paise
+                    {
+                        return Err(format!(
+                            "[PosPersistence] IDEMPOTENCY_CONFLICT: Order item {} attributes mismatched on retry for KOT ID {}",
+                            oi.id, kot.id
+                        ));
+                    }
+                }
+                None => {
+                    return Err(format!(
+                        "[PosPersistence] IDEMPOTENCY_CONFLICT: Order item {} missing in order {} on retry",
+                        oi.id, order.id
+                    ));
+                }
+            }
+        }
+
+        kot.kot_number = existing_kot_number;
+        kot.printed_at = existing_printed_at;
+        order.version = Some(existing_version);
+
+        return Ok(AppendOrderItemsAndKotResult {
+            order,
+            new_items,
+            kot,
+            kot_items,
+            outbox_entries: vec![],
+        });
+    }
+
+    // 6. Item ID conflict check
+    for item in &new_items {
+        let exists: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM order_items WHERE id = ?;",
+                params![item.id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if exists.is_some() {
+            return Err(format!(
+                "[PosPersistence] ITEM_ID_CONFLICT: Order item ID {} already exists",
+                item.id
+            ));
+        }
+    }
+
+    // 7. Monotonic KOT Number Allocation
+    let allocated_kot_number: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(kot_number), 0) + 1 FROM pos_kots WHERE order_id = ?;",
+            params![order.id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    kot.kot_number = allocated_kot_number;
+
+    let now = now_iso();
+
+    // 8. Insert new order_items
+    {
+        let mut item_stmt = tx
+            .prepare_cached(
+                "INSERT INTO order_items (
+                    id, order_id, product_id, variant_id, product_name, unit_price_paise,
+                    quantity, tax_rate, discount_amount_paise, line_total_paise, notes, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+            )
+            .map_err(|e| e.to_string())?;
+
+        for item in &new_items {
+            let item_created = if item.created_at.is_empty() { &now } else { &item.created_at };
+
+            item_stmt
+                .execute(params![
+                    item.id,
+                    order.id,
+                    item.product_id,
+                    item.variant_id,
+                    item.product_name,
+                    item.unit_price_paise,
+                    item.quantity,
+                    item.tax_rate,
+                    item.discount_amount_paise,
+                    item.line_total_paise,
+                    item.notes,
+                    item_created,
+                ])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    // 9. Update cumulative order totals
+    tx.execute(
+        "UPDATE orders SET
+            subtotal_paise = ?,
+            tax_total_paise = ?,
+            discount_total_paise = ?,
+            delivery_charge_paise = ?,
+            grand_total_paise = ?,
+            updated_at = ?
+         WHERE id = ?;",
+        params![
+            order.subtotal_paise,
+            order.tax_total_paise,
+            order.discount_total_paise,
+            order.delivery_charge_paise,
+            order.grand_total_paise,
+            now,
+            order.id,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+
+    // 10. Insert KOT header
+    let kot_printed = if kot.printed_at.is_empty() { &now } else { &kot.printed_at };
+    tx.execute(
+        "INSERT INTO pos_kots (id, order_id, kot_number, device_id, status, printed_at)
+         VALUES (?, ?, ?, ?, ?, ?);",
+        params![
+            kot.id,
+            order.id,
+            allocated_kot_number,
+            kot.device_id,
+            kot.status,
+            kot_printed,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+
+    // 11. Insert KOT items
+    {
+        let mut kot_item_stmt = tx
+            .prepare_cached(
+                "INSERT INTO kot_items (id, kot_id, order_item_id, product_id, variant_id, product_name, quantity, notes)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+            )
+            .map_err(|e| e.to_string())?;
+
+        for ki in &kot_items {
+            kot_item_stmt
+                .execute(params![
+                    ki.id,
+                    kot.id,
+                    ki.order_item_id,
+                    ki.product_id,
+                    ki.variant_id,
+                    ki.product_name,
+                    ki.quantity,
+                    ki.notes,
+                ])
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    order.version = Some(existing_version);
+    order.updated_at = now.clone();
+
+    // 12. Single Atomic Outbox Row
+    let payload = serde_json::json!({
+        "kot": kot,
+        "items": kot_items,
+        "orderItems": new_items,
+        "order": order,
+    });
+
+    let outbox_row = insert_outbox_record(
+        &tx,
+        "pos_kots",
+        &kot.id,
+        "INSERT",
+        &payload,
+        kot_printed,
+    )
+    .map_err(|e| e.to_string())?;
+
+    tx.commit().map_err(|e| e.to_string())?;
+
+    Ok(AppendOrderItemsAndKotResult {
+        order,
+        new_items,
+        kot,
+        kot_items,
+        outbox_entries: vec![outbox_row],
+    })
+}
+
 pub fn save_kot_correction(
     conn: &mut Connection,
     correction: KotCorrectionDomain,
@@ -867,12 +1796,14 @@ pub fn save_kot_correction(
 
     tx.execute(
         "INSERT INTO kot_corrections (
-            id, order_id, kot_id, product_name, cancelled_qty, reason, authorized_by_staff_id, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+            id, order_id, kot_id, kot_item_id, order_item_id, product_name, cancelled_qty, reason, authorized_by_staff_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
         params![
             correction.id,
             correction.order_id,
             correction.kot_id,
+            correction.kot_item_id,
+            correction.order_item_id,
             correction.product_name,
             correction.cancelled_qty,
             correction.reason,
@@ -896,6 +1827,304 @@ pub fn save_kot_correction(
     tx.commit().map_err(|e| e.to_string())?;
 
     Ok(outbox_row)
+}
+
+pub fn apply_kot_correction(
+    conn: &mut Connection,
+    correction: KotCorrectionDomain,
+    updated_order_item: OrderItemDomain,
+    updated_order: OrderDomain,
+) -> Result<ApplyKotCorrectionResult, String> {
+    if correction.cancelled_qty <= 0 {
+        return Err("[PosPersistence] INVALID_QUANTITY: cancelled_qty must be greater than 0".to_string());
+    }
+
+    if correction.reason.trim().is_empty() {
+        return Err("[PosPersistence] VALIDATION_ERROR: Reason is required for KOT correction".to_string());
+    }
+
+    if correction.authorized_by_staff_id.trim().is_empty() {
+        return Err("[PosPersistence] VALIDATION_ERROR: Staff ID is required to authorize KOT correction".to_string());
+    }
+
+    let kot_id = correction.kot_id.as_deref().ok_or_else(|| {
+        "[PosPersistence] VALIDATION_ERROR: Missing kot_id in correction".to_string()
+    })?;
+
+    let kot_item_id = correction.kot_item_id.as_deref().ok_or_else(|| {
+        "[PosPersistence] VALIDATION_ERROR: Missing kot_item_id in correction".to_string()
+    })?;
+
+    let order_item_id = correction.order_item_id.as_deref().ok_or_else(|| {
+        "[PosPersistence] VALIDATION_ERROR: Missing order_item_id in correction".to_string()
+    })?;
+
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    // 1. Operation-level Idempotency Check
+    let existing_corr: Option<(String, Option<String>, Option<String>, Option<String>, i64, String, String, String)> = tx
+        .query_row(
+            "SELECT order_id, kot_id, kot_item_id, order_item_id, cancelled_qty, reason, authorized_by_staff_id, created_at
+             FROM kot_corrections WHERE id = ?;",
+            params![correction.id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+
+    if let Some((ex_ord, ex_kot, ex_kitem, ex_oitem, ex_qty, ex_reason, ex_staff, ex_created)) = existing_corr {
+        if ex_ord != correction.order_id
+            || ex_kot.as_deref() != Some(kot_id)
+            || ex_kitem.as_deref() != Some(kot_item_id)
+            || ex_oitem.as_deref() != Some(order_item_id)
+            || ex_qty != correction.cancelled_qty
+            || ex_reason != correction.reason
+            || ex_staff != correction.authorized_by_staff_id
+        {
+            return Err(format!(
+                "[PosPersistence] IDEMPOTENCY_CONFLICT: Correction ID {} already exists with different payload",
+                correction.id
+            ));
+        }
+
+        let (cur_item_qty, cur_item_total): (i64, i64) = tx
+            .query_row(
+                "SELECT quantity, line_total_paise FROM order_items WHERE id = ?;",
+                params![order_item_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|_| "[PosPersistence] IDEMPOTENCY_CONFLICT: Order item not found on retry".to_string())?;
+
+        if cur_item_qty != updated_order_item.quantity || cur_item_total != updated_order_item.line_total_paise {
+            return Err("[PosPersistence] IDEMPOTENCY_CONFLICT: Order item state mismatch on correction retry".to_string());
+        }
+
+        let cur_order_total: i64 = tx
+            .query_row(
+                "SELECT grand_total_paise FROM orders WHERE id = ?;",
+                params![correction.order_id],
+                |r| r.get(0),
+            )
+            .map_err(|_| "[PosPersistence] IDEMPOTENCY_CONFLICT: Order not found on retry".to_string())?;
+
+        if cur_order_total != updated_order.grand_total_paise {
+            return Err("[PosPersistence] IDEMPOTENCY_CONFLICT: Order totals mismatch on correction retry".to_string());
+        }
+
+        return Ok(ApplyKotCorrectionResult {
+            correction: KotCorrectionDomain {
+                created_at: ex_created,
+                ..correction
+            },
+            updated_order_item,
+            updated_order,
+            outbox_entries: vec![],
+        });
+    }
+
+    // 2. Load and validate target Order (status gate: kot_sent only)
+    let (order_status, order_version): (String, i64) = tx
+        .query_row(
+            "SELECT status, version FROM orders WHERE id = ?;",
+            params![correction.order_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| {
+            format!(
+                "[PosPersistence] ORDER_NOT_FOUND: Order {} does not exist for correction",
+                correction.order_id
+            )
+        })?;
+
+    if order_status != "kot_sent" {
+        return Err(format!(
+            "[PosPersistence] ORDER_STATUS_INVALID: Order {} has status '{}', only 'kot_sent' orders can be corrected",
+            correction.order_id, order_status
+        ));
+    }
+
+    // 3. Load and validate target Commercial Order Item
+    let (item_order_id, current_qty): (String, i64) = tx
+        .query_row(
+            "SELECT order_id, quantity FROM order_items WHERE id = ?;",
+            params![order_item_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| {
+            format!(
+                "[PosPersistence] ORDER_ITEM_NOT_FOUND: Order item {} does not exist",
+                order_item_id
+            )
+        })?;
+
+    if item_order_id != correction.order_id {
+        return Err(format!(
+            "[PosPersistence] LINEAGE_MISMATCH: Order item {} belongs to order {}, not requested {}",
+            order_item_id, item_order_id, correction.order_id
+        ));
+    }
+
+    // 4. Load and validate KOT and KOT Item Lineage
+    let kot_order_id: String = tx
+        .query_row(
+            "SELECT order_id FROM pos_kots WHERE id = ?;",
+            params![kot_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| {
+            format!(
+                "[PosPersistence] KOT_NOT_FOUND: KOT {} does not exist",
+                kot_id
+            )
+        })?;
+
+    if kot_order_id != correction.order_id {
+        return Err(format!(
+            "[PosPersistence] LINEAGE_MISMATCH: KOT {} belongs to order {}, not requested {}",
+            kot_id, kot_order_id, correction.order_id
+        ));
+    }
+
+    let (ki_kot_id, ki_order_item_id): (String, Option<String>) = tx
+        .query_row(
+            "SELECT kot_id, order_item_id FROM kot_items WHERE id = ?;",
+            params![kot_item_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| {
+            format!(
+                "[PosPersistence] KOT_ITEM_NOT_FOUND: KOT item {} does not exist",
+                kot_item_id
+            )
+        })?;
+
+    if ki_kot_id != kot_id {
+        return Err(format!(
+            "[PosPersistence] LINEAGE_MISMATCH: KOT item {} belongs to KOT {}, not requested {}",
+            kot_item_id, ki_kot_id, kot_id
+        ));
+    }
+
+    let linked_order_item_id = match ki_order_item_id {
+        Some(id) if !id.trim().is_empty() => id,
+        _ => {
+            return Err(format!(
+                "[PosPersistence] CORRECTION_LINEAGE_UNAVAILABLE: Historical KOT item {} does not carry order_item_id",
+                kot_item_id
+            ));
+        }
+    };
+
+    if linked_order_item_id != order_item_id {
+        return Err(format!(
+            "[PosPersistence] LINEAGE_MISMATCH: KOT item {} links to order item {}, not requested {}",
+            kot_item_id, linked_order_item_id, order_item_id
+        ));
+    }
+
+    // 5. Over-Correction Protection (Current Billable Authority = order_items.quantity)
+    if correction.cancelled_qty > current_qty {
+        return Err(format!(
+            "[PosPersistence] OVER_CORRECTION: Cannot cancel {} units when current billable quantity is {}",
+            correction.cancelled_qty, current_qty
+        ));
+    }
+
+    let new_quantity = current_qty - correction.cancelled_qty;
+    if updated_order_item.quantity != new_quantity {
+        return Err(format!(
+            "[PosPersistence] VALIDATION_ERROR: Target order item quantity mismatch (expected {}, got {})",
+            new_quantity, updated_order_item.quantity
+        ));
+    }
+
+    let now = now_iso();
+
+    // 6. Insert Append-Only Correction Audit Event
+    tx.execute(
+        "INSERT INTO kot_corrections (
+            id, order_id, kot_id, kot_item_id, order_item_id, product_name,
+            cancelled_qty, reason, authorized_by_staff_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+        params![
+            correction.id,
+            correction.order_id,
+            kot_id,
+            kot_item_id,
+            order_item_id,
+            correction.product_name,
+            correction.cancelled_qty,
+            correction.reason.trim(),
+            correction.authorized_by_staff_id,
+            now,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+
+    // 7. Mutate Target Commercial Order Item (Preserved even if quantity = 0)
+    tx.execute(
+        "UPDATE order_items SET quantity = ?, line_total_paise = ? WHERE id = ?;",
+        params![new_quantity, updated_order_item.line_total_paise, order_item_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    // 8. Mutate Parent Order Cumulative Financial Totals
+    tx.execute(
+        "UPDATE orders SET
+            subtotal_paise = ?,
+            tax_total_paise = ?,
+            discount_total_paise = ?,
+            delivery_charge_paise = ?,
+            grand_total_paise = ?,
+            updated_at = ?
+         WHERE id = ?;",
+        params![
+            updated_order.subtotal_paise,
+            updated_order.tax_total_paise,
+            updated_order.discount_total_paise,
+            updated_order.delivery_charge_paise,
+            updated_order.grand_total_paise,
+            now,
+            correction.order_id,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let mut resulting_order = updated_order.clone();
+    resulting_order.version = Some(order_version);
+    resulting_order.updated_at = now.clone();
+
+    let mut resulting_item = updated_order_item.clone();
+    resulting_item.quantity = new_quantity;
+
+    let mut resulting_correction = correction.clone();
+    resulting_correction.created_at = now.clone();
+
+    // 9. Emit ONE Durable Outbox Record
+    let payload = serde_json::json!({
+        "correction": resulting_correction,
+        "updatedOrderItem": resulting_item,
+        "updatedOrder": resulting_order,
+    });
+
+    let outbox_row = insert_outbox_record(
+        &tx,
+        "kot_corrections",
+        &resulting_correction.id,
+        "INSERT",
+        &payload,
+        &now,
+    )
+    .map_err(|e| e.to_string())?;
+
+    tx.commit().map_err(|e| e.to_string())?;
+
+    Ok(ApplyKotCorrectionResult {
+        correction: resulting_correction,
+        updated_order_item: resulting_item,
+        updated_order: resulting_order,
+        outbox_entries: vec![outbox_row],
+    })
 }
 
 pub fn save_bill_with_sequence(
@@ -932,6 +2161,48 @@ pub fn save_bill_with_sequence(
 
     bill.bill_number = authoritative_bill_number.clone();
     bill.device_id = Some(config.device_id);
+
+    // Verify and advance order status atomically
+    let (order_status, table_session_id): (String, Option<String>) = tx
+        .query_row(
+            "SELECT status, table_session_id FROM orders WHERE id = ?;",
+            params![bill.order_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| {
+            format!(
+                "[PosPersistence] ORDER_NOT_FOUND: Order {} does not exist for bill finalization",
+                bill.order_id
+            )
+        })?;
+
+    if order_status == "cancelled" || order_status == "closed" {
+        return Err(format!(
+            "[PosPersistence] ORDER_STATUS_INVALID: Cannot finalize bill for order {} with status '{}'",
+            bill.order_id, order_status
+        ));
+    }
+    if order_status == "settled" {
+        return Err(format!(
+            "[PosPersistence] ORDER_STATUS_REGRESSION: Cannot finalize bill for already settled order {}",
+            bill.order_id
+        ));
+    }
+
+    let now = now_iso();
+    tx.execute(
+        "UPDATE orders SET status = 'billed', updated_at = ? WHERE id = ?;",
+        params![now, bill.order_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    if let Some(session_id) = table_session_id {
+        tx.execute(
+            "UPDATE table_sessions SET session_status = 'billed' WHERE id = ? AND session_status = 'open';",
+            params![session_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
 
     // 4. Insert bill header
     tx.execute(
@@ -983,7 +2254,138 @@ pub fn save_payment(
 ) -> Result<SavePaymentResult, String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
 
-    // 1. Insert payment record
+    // 0. Operation-level Idempotency Check FIRST
+    let existing_payment: Option<(String, String, String, String, i64, Option<String>, String, Option<String>)> = tx
+        .query_row(
+            "SELECT id, bill_id, order_id, payment_mode, amount_paid_paise, confirmed_by_staff_id, confirmed_at, notes
+             FROM payments WHERE id = ?;",
+            params![payment.id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+
+    if let Some((_ex_id, ex_bill_id, ex_order_id, ex_mode, ex_amount, ex_staff, ex_confirmed_at, ex_notes)) = existing_payment {
+        if ex_bill_id != payment.bill_id
+            || ex_order_id != payment.order_id
+            || ex_mode != payment.payment_mode
+            || ex_amount != payment.amount_paid_paise
+            || ex_staff != payment.confirmed_by_staff_id
+            || ex_confirmed_at != payment.confirmed_at
+            || ex_notes != payment.notes
+        {
+            return Err(format!(
+                "[PosPersistence] CONTRACT_CONFLICT: Payment ID {} already exists with different payload",
+                payment.id
+            ));
+        }
+
+        let outbox_entry: Option<OutboxRow> = tx
+            .query_row(
+                "SELECT seq, id, entity_type, entity_id, operation, payload_json, created_at, attempt_count, next_attempt_at, last_error
+                 FROM sync_outbox WHERE entity_type = 'payments' AND entity_id = ? LIMIT 1;",
+                params![payment.id],
+                |r| Ok(OutboxRow {
+                    seq: r.get(0)?,
+                    id: r.get(1)?,
+                    entity_type: r.get(2)?,
+                    entity_id: r.get(3)?,
+                    operation: r.get(4)?,
+                    payload_json: r.get(5)?,
+                    created_at: r.get(6)?,
+                    attempt_count: r.get(7)?,
+                    next_attempt_at: r.get(8)?,
+                    last_error: r.get(9)?,
+                }),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+
+        let outbox_row = outbox_entry.unwrap_or(OutboxRow {
+            seq: 0,
+            id: String::new(),
+            entity_type: "payments".to_string(),
+            entity_id: payment.id.clone(),
+            operation: "INSERT".to_string(),
+            payload_json: String::new(),
+            created_at: ex_confirmed_at,
+            attempt_count: 0,
+            next_attempt_at: None,
+            last_error: None,
+        });
+
+        return Ok(SavePaymentResult {
+            payment,
+            updated_bill,
+            outbox_entry: outbox_row,
+        });
+    }
+
+    // 1. Verify target order exists and has status === 'billed'
+    let order_status: String = tx
+        .query_row(
+            "SELECT status FROM orders WHERE id = ?;",
+            params![payment.order_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| {
+            format!(
+                "[PosPersistence] ORDER_NOT_FOUND: Order {} does not exist for payment",
+                payment.order_id
+            )
+        })?;
+
+    if order_status != "billed" {
+        return Err(format!(
+            "[PosPersistence] ORDER_STATUS_INVALID: Cannot record payment for order {} with status '{}', order must be 'billed'",
+            payment.order_id, order_status
+        ));
+    }
+
+    // 2. Bill status guard: bill must exist, match order_id, and have payment_status == 'unpaid'
+    let (bill_order_id, bill_payment_status): (String, String) = tx
+        .query_row(
+            "SELECT order_id, payment_status FROM bills WHERE id = ?;",
+            params![payment.bill_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| {
+            format!(
+                "[PosPersistence] BILL_NOT_FOUND: Bill {} does not exist for payment",
+                payment.bill_id
+            )
+        })?;
+
+    if bill_order_id != payment.order_id {
+        return Err(format!(
+            "[PosPersistence] BILL_ORDER_MISMATCH: Bill {} belongs to order {}, not requested {}",
+            payment.bill_id, bill_order_id, payment.order_id
+        ));
+    }
+
+    if bill_payment_status != "unpaid" {
+        return Err(format!(
+            "[PosPersistence] BILL_ALREADY_SETTLED: Bill {} has payment status '{}', only 'unpaid' bills can be settled",
+            payment.bill_id, bill_payment_status
+        ));
+    }
+
+    // 3. Validate updated_bill consistency if passed
+    if updated_bill.id != payment.bill_id || updated_bill.order_id != payment.order_id {
+        return Err(format!(
+            "[PosPersistence] BILL_ORDER_MISMATCH: updated_bill identity mismatch for bill {}",
+            payment.bill_id
+        ));
+    }
+
+    let now = now_iso();
+    tx.execute(
+        "UPDATE orders SET status = 'settled', updated_at = ? WHERE id = ?;",
+        params![now, payment.order_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    // 4. Insert payment record
     tx.execute(
         "INSERT INTO payments (
             id, bill_id, order_id, payment_mode, amount_paid_paise, confirmed_by_staff_id, confirmed_at, notes
@@ -1001,14 +2403,14 @@ pub fn save_payment(
     )
     .map_err(|e| e.to_string())?;
 
-    // 2. Update bill payment status
+    // 5. Update bill payment status
     tx.execute(
         "UPDATE bills SET payment_status = ? WHERE id = ?;",
         params![updated_bill.payment_status, updated_bill.id],
     )
     .map_err(|e| e.to_string())?;
 
-    // 3. Outbox insertion
+    // 6. Outbox insertion
     let payload = serde_json::json!({
         "payment": payment,
         "paymentStatus": updated_bill.payment_status,
@@ -1105,6 +2507,161 @@ pub fn save_inventory_movement(
         new_stock,
         outbox_entry: outbox_row,
     })
+}
+
+pub fn open_table_session(
+    conn: &mut Connection,
+    table_id: &str,
+    guest_count: i64,
+) -> Result<TableSessionDomain, String> {
+    if guest_count <= 0 {
+        return Err(format!(
+            "[PosPersistence] INVALID_GUEST_COUNT: guest_count must be greater than 0, received {}",
+            guest_count
+        ));
+    }
+
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    let is_active: i64 = tx
+        .query_row(
+            "SELECT is_active FROM pos_tables WHERE id = ?;",
+            params![table_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| {
+            format!(
+                "[PosPersistence] TABLE_NOT_FOUND: Table {} does not exist",
+                table_id
+            )
+        })?;
+
+    if is_active != 1 {
+        return Err(format!(
+            "[PosPersistence] TABLE_INACTIVE: Table {} is not active",
+            table_id
+        ));
+    }
+
+    let existing_active: Option<String> = tx
+        .query_row(
+            "SELECT id FROM table_sessions WHERE table_id = ? AND session_status IN ('open', 'billed') LIMIT 1;",
+            params![table_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+
+    if let Some(existing_id) = existing_active {
+        return Err(format!(
+            "[PosPersistence] TABLE_ALREADY_OCCUPIED: Table {} already has an active session ({})",
+            table_id, existing_id
+        ));
+    }
+
+    let session_id = generate_uuid(&tx);
+    let now = now_iso();
+
+    tx.execute(
+        "INSERT INTO table_sessions (id, table_id, current_order_id, guest_count, session_status, opened_at, closed_at)
+         VALUES (?, ?, NULL, ?, 'open', ?, NULL);",
+        params![session_id, table_id, guest_count, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    tx.commit().map_err(|e| e.to_string())?;
+
+    Ok(TableSessionDomain {
+        id: session_id,
+        table_id: table_id.to_string(),
+        current_order_id: None,
+        guest_count,
+        session_status: "open".to_string(),
+        opened_at: now,
+        closed_at: None,
+    })
+}
+
+pub fn close_table_session(
+    conn: &mut Connection,
+    session_id: &str,
+    order_id: &str,
+) -> Result<(), String> {
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+    let (current_order_id, session_status): (Option<String>, String) = tx
+        .query_row(
+            "SELECT current_order_id, session_status FROM table_sessions WHERE id = ?;",
+            params![session_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| {
+            format!(
+                "[PosPersistence] SESSION_NOT_FOUND: Table session {} does not exist",
+                session_id
+            )
+        })?;
+
+    if session_status == "closed" {
+        return Err(format!(
+            "[PosPersistence] SESSION_ALREADY_CLOSED: Table session {} is already closed",
+            session_id
+        ));
+    }
+    if session_status != "open" && session_status != "billed" {
+        return Err(format!(
+            "[PosPersistence] SESSION_NOT_ACTIVE: Table session {} has status '{}', cannot close",
+            session_id, session_status
+        ));
+    }
+
+    let (table_session_id, order_status): (Option<String>, String) = tx
+        .query_row(
+            "SELECT table_session_id, status FROM orders WHERE id = ?;",
+            params![order_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| {
+            format!(
+                "[PosPersistence] ORDER_NOT_FOUND: Order {} does not exist",
+                order_id
+            )
+        })?;
+
+    let is_linked = table_session_id.as_deref() == Some(session_id)
+        || current_order_id.as_deref() == Some(order_id);
+
+    if !is_linked {
+        return Err(format!(
+            "[PosPersistence] SESSION_ORDER_MISMATCH: Order {} is not linked to session {}",
+            order_id, session_id
+        ));
+    }
+
+    if order_status != "settled" {
+        return Err(format!(
+            "[PosPersistence] ORDER_NOT_SETTLED: Order {} has status '{}', must be 'settled' before closing session",
+            order_id, order_status
+        ));
+    }
+
+    let now = now_iso();
+
+    tx.execute(
+        "UPDATE table_sessions SET session_status = 'closed', closed_at = ? WHERE id = ?;",
+        params![now, session_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    tx.execute(
+        "UPDATE orders SET status = 'closed', updated_at = ? WHERE id = ?;",
+        params![now, order_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    tx.commit().map_err(|e| e.to_string())?;
+
+    Ok(())
 }
 
 pub fn get_pending_outbox(
@@ -1475,8 +3032,8 @@ pub fn apply_pull_batch(
         PullDataset::Orders => {
             let mut order_stmt = tx
                 .prepare_cached(
-                    "INSERT INTO orders (id, display_number, channel, order_type, customer_id, table_session_id, status, subtotal_paise, tax_total_paise, discount_total_paise, delivery_charge_paise, grand_total_paise, device_id, created_at, updated_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    "INSERT INTO orders (id, display_number, channel, order_type, customer_id, table_session_id, status, subtotal_paise, tax_total_paise, discount_total_paise, delivery_charge_paise, grand_total_paise, device_id, version, created_at, updated_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                      ON CONFLICT(id) DO UPDATE SET
                        display_number = excluded.display_number,
                        channel = excluded.channel,
@@ -1490,6 +3047,7 @@ pub fn apply_pull_batch(
                        delivery_charge_paise = excluded.delivery_charge_paise,
                        grand_total_paise = excluded.grand_total_paise,
                        device_id = excluded.device_id,
+                       version = excluded.version,
                        created_at = excluded.created_at,
                        updated_at = excluded.updated_at;",
                 )
@@ -1551,6 +3109,51 @@ pub fn apply_pull_batch(
                     break;
                 }
 
+                let incoming_version = order["version"].as_i64().unwrap_or(1);
+                let local_order: Option<(i64, String)> = tx
+                    .query_row(
+                        "SELECT version, status FROM orders WHERE id = ?;",
+                        params![id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(|e| e.to_string())?;
+
+                if let Some((local_version, local_status)) = local_order {
+                    if incoming_version < local_version {
+                        safe_last_updated_at = order["updated_at"].as_str().or_else(|| order["created_at"].as_str()).unwrap_or(&now_iso()).to_string();
+                        safe_last_id = id.to_string();
+                        continue;
+                    }
+
+                    let order_status = order["status"].as_str().unwrap_or("draft");
+                    if incoming_version > local_version && local_status == "draft" && order_status == "draft" {
+                        let incoming_item_ids: Vec<String> = item_list
+                            .iter()
+                            .filter(|it| it["order_id"].as_str() == Some(id))
+                            .filter_map(|it| it["id"].as_str().map(|s| s.to_string()))
+                            .collect();
+
+                        if !incoming_item_ids.is_empty() {
+                            let placeholders = vec!["?"; incoming_item_ids.len()].join(",");
+                            let delete_sql = format!(
+                                "DELETE FROM order_items WHERE order_id = ? AND id NOT IN ({});",
+                                placeholders
+                            );
+                            let mut delete_params: Vec<&dyn rusqlite::ToSql> = Vec::new();
+                            delete_params.push(&id);
+                            for item_id in &incoming_item_ids {
+                                delete_params.push(item_id);
+                            }
+                            tx.execute(&delete_sql, rusqlite::params_from_iter(delete_params))
+                                .map_err(|e| e.to_string())?;
+                        } else {
+                            tx.execute("DELETE FROM order_items WHERE order_id = ?;", params![id])
+                                .map_err(|e| e.to_string())?;
+                        }
+                    }
+                }
+
                 order_stmt
                     .execute(params![
                         id,
@@ -1566,6 +3169,7 @@ pub fn apply_pull_batch(
                         to_paise(&order["delivery_charge"]),
                         to_paise(&order["grand_total"]),
                         order["device_id"].as_str(),
+                        incoming_version,
                         order["created_at"].as_str().unwrap_or(&now_iso()),
                         order["updated_at"].as_str().unwrap_or(&now_iso()),
                     ])
@@ -1751,10 +3355,11 @@ pub fn apply_pull_batch(
         PullDataset::KotItems => {
             let mut stmt = tx
                 .prepare_cached(
-                    "INSERT INTO kot_items (id, kot_id, product_id, variant_id, product_name, quantity, notes)
-                     VALUES (?, ?, ?, ?, ?, ?, ?)
+                    "INSERT INTO kot_items (id, kot_id, order_item_id, product_id, variant_id, product_name, quantity, notes)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                      ON CONFLICT(id) DO UPDATE SET
                        kot_id = excluded.kot_id,
+                       order_item_id = excluded.order_item_id,
                        product_id = excluded.product_id,
                        variant_id = excluded.variant_id,
                        product_name = excluded.product_name,
@@ -1775,6 +3380,7 @@ pub fn apply_pull_batch(
                 stmt.execute(params![
                     id,
                     kot_id,
+                    row["order_item_id"].as_str(),
                     row["product_id"].as_str().unwrap_or(""),
                     row["variant_id"].as_str(),
                     row["product_name"].as_str().unwrap_or(""),
@@ -1790,11 +3396,13 @@ pub fn apply_pull_batch(
         PullDataset::KotCorrections => {
             let mut stmt = tx
                 .prepare_cached(
-                    "INSERT INTO kot_corrections (id, order_id, kot_id, product_name, cancelled_qty, reason, authorized_by_staff_id, created_at)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    "INSERT INTO kot_corrections (id, order_id, kot_id, kot_item_id, order_item_id, product_name, cancelled_qty, reason, authorized_by_staff_id, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                      ON CONFLICT(id) DO UPDATE SET
                        order_id = excluded.order_id,
                        kot_id = excluded.kot_id,
+                       kot_item_id = excluded.kot_item_id,
+                       order_item_id = excluded.order_item_id,
                        product_name = excluded.product_name,
                        cancelled_qty = excluded.cancelled_qty,
                        reason = excluded.reason,
@@ -1816,6 +3424,8 @@ pub fn apply_pull_batch(
                     id,
                     order_id,
                     row["kot_id"].as_str(),
+                    row["kot_item_id"].as_str(),
+                    row["order_item_id"].as_str(),
                     row["product_name"].as_str().unwrap_or(""),
                     row["cancelled_qty"].as_i64().unwrap_or(1),
                     row["reason"].as_str().unwrap_or(""),
@@ -2036,12 +3646,33 @@ pub fn execute_mutation(
             let res = save_order_aggregate(conn, order, items)?;
             serde_json::to_value(res).map_err(|e| e.to_string())
         }
+        NativeMutation::ReplaceDraftOrderAggregate { order, items } => {
+            let res = replace_draft_order_aggregate(conn, order, items)?;
+            serde_json::to_value(res).map_err(|e| e.to_string())
+        }
         NativeMutation::SaveKotAggregate { kot, items } => {
             let res = save_kot_aggregate(conn, kot, items)?;
             serde_json::to_value(res).map_err(|e| e.to_string())
         }
+        NativeMutation::AppendOrderItemsAndKot {
+            order,
+            new_items,
+            kot,
+            kot_items,
+        } => {
+            let res = append_order_items_and_kot(conn, order, new_items, kot, kot_items)?;
+            serde_json::to_value(res).map_err(|e| e.to_string())
+        }
         NativeMutation::SaveKotCorrection(correction) => {
             let res = save_kot_correction(conn, correction)?;
+            serde_json::to_value(res).map_err(|e| e.to_string())
+        }
+        NativeMutation::ApplyKotCorrection {
+            correction,
+            updated_order_item,
+            updated_order,
+        } => {
+            let res = apply_kot_correction(conn, correction, updated_order_item, updated_order)?;
             serde_json::to_value(res).map_err(|e| e.to_string())
         }
         NativeMutation::SaveBillWithSequence(bill) => {
@@ -2058,6 +3689,20 @@ pub fn execute_mutation(
         NativeMutation::SaveInventoryMovement(input) => {
             let res = save_inventory_movement(conn, input)?;
             serde_json::to_value(res).map_err(|e| e.to_string())
+        }
+        NativeMutation::OpenTableSession {
+            table_id,
+            guest_count,
+        } => {
+            let res = open_table_session(conn, &table_id, guest_count)?;
+            serde_json::to_value(res).map_err(|e| e.to_string())
+        }
+        NativeMutation::CloseTableSession {
+            session_id,
+            order_id,
+        } => {
+            close_table_session(conn, &session_id, &order_id)?;
+            Ok(serde_json::json!({ "closed": true }))
         }
         NativeMutation::AcknowledgeOutbox { seq } => {
             acknowledge_outbox(conn, seq).map_err(|e| e.to_string())?;
@@ -2079,6 +3724,354 @@ pub fn execute_mutation(
     }
 }
 
+pub fn get_tables_with_sessions(conn: &Connection) -> Result<Vec<TableWithActiveSession>, String> {
+    let mut table_stmt = conn
+        .prepare_cached(
+            "SELECT id, table_number, section, capacity, is_active, created_at
+             FROM pos_tables
+             WHERE is_active = 1
+             ORDER BY section ASC, table_number ASC;",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let tables: Vec<PosTableDomain> = table_stmt
+        .query_map([], |row| {
+            let is_active_int: i64 = row.get(4)?;
+            Ok(PosTableDomain {
+                id: row.get(0)?,
+                table_number: row.get(1)?,
+                section: row.get(2)?,
+                capacity: row.get(3)?,
+                is_active: is_active_int == 1,
+                created_at: row.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    let mut session_stmt = conn
+        .prepare_cached(
+            "SELECT id, table_id, current_order_id, guest_count, session_status, opened_at, closed_at
+             FROM table_sessions
+             WHERE session_status IN ('open', 'billed')
+             ORDER BY opened_at DESC;",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let active_sessions: Vec<TableSessionDomain> = session_stmt
+        .query_map([], |row| {
+            Ok(TableSessionDomain {
+                id: row.get(0)?,
+                table_id: row.get(1)?,
+                current_order_id: row.get(2)?,
+                guest_count: row.get(3)?,
+                session_status: row.get(4)?,
+                opened_at: row.get(5)?,
+                closed_at: row.get(6)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    let mut session_map: std::collections::HashMap<String, Vec<TableSessionDomain>> =
+        std::collections::HashMap::new();
+    for session in active_sessions {
+        session_map
+            .entry(session.table_id.clone())
+            .or_default()
+            .push(session);
+    }
+
+    let mut result = Vec::with_capacity(tables.len());
+    for table in tables {
+        let active_session = if let Some(sessions) = session_map.remove(&table.id) {
+            if sessions.len() > 1 {
+                return Err(format!(
+                    "INVARIANT_VIOLATION: Multiple active sessions ({}) found for table {}",
+                    sessions.len(),
+                    table.id
+                ));
+            }
+            sessions.into_iter().next()
+        } else {
+            None
+        };
+
+        result.push(TableWithActiveSession {
+            table,
+            active_session,
+        });
+    }
+
+    Ok(result)
+}
+
+pub fn get_catalog(conn: &Connection) -> Result<PosCatalog, String> {
+    let mut cat_stmt = conn
+        .prepare_cached(
+            "SELECT id, name, slug, display_order, is_active, created_at, updated_at
+             FROM categories
+             WHERE is_active = 1
+             ORDER BY display_order ASC, name ASC;",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let categories: Vec<CategoryCatalogDomain> = cat_stmt
+        .query_map([], |row| {
+            let is_active_int: i64 = row.get(4)?;
+            Ok(CategoryCatalogDomain {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                slug: row.get(2)?,
+                display_order: row.get(3)?,
+                is_active: is_active_int == 1,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    let mut prod_stmt = conn
+        .prepare_cached(
+            "SELECT p.id, p.category_id, p.name, p.description, p.image_url,
+                    p.base_price_paise, p.is_available, p.tax_rate, p.is_inventory_tracked,
+                    p.created_at, p.updated_at
+             FROM products p
+             INNER JOIN categories c ON p.category_id = c.id
+             WHERE c.is_active = 1 AND p.is_available = 1
+             ORDER BY c.display_order ASC, p.name ASC;",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let products: Vec<ProductCatalogDomain> = prod_stmt
+        .query_map([], |row| {
+            let is_available_int: i64 = row.get(6)?;
+            let is_inventory_int: i64 = row.get(8)?;
+            Ok(ProductCatalogDomain {
+                id: row.get(0)?,
+                category_id: row.get(1)?,
+                name: row.get(2)?,
+                description: row.get(3)?,
+                image_url: row.get(4)?,
+                base_price_paise: row.get(5)?,
+                is_available: is_available_int == 1,
+                tax_rate: row.get(7)?,
+                is_inventory_tracked: is_inventory_int == 1,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    let mut var_stmt = conn
+        .prepare_cached(
+            "SELECT pv.id, pv.product_id, pv.variant_name, pv.price_override_paise,
+                    pv.is_available, pv.created_at
+             FROM product_variants pv
+             INNER JOIN products p ON pv.product_id = p.id
+             INNER JOIN categories c ON p.category_id = c.id
+             WHERE c.is_active = 1 AND p.is_available = 1 AND pv.is_available = 1
+             ORDER BY pv.variant_name ASC;",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let variants: Vec<ProductVariantCatalogDomain> = var_stmt
+        .query_map([], |row| {
+            let is_available_int: i64 = row.get(4)?;
+            Ok(ProductVariantCatalogDomain {
+                id: row.get(0)?,
+                product_id: row.get(1)?,
+                variant_name: row.get(2)?,
+                price_override_paise: row.get(3)?,
+                is_available: is_available_int == 1,
+                created_at: row.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    Ok(PosCatalog {
+        categories,
+        products,
+        variants,
+    })
+}
+
+pub fn get_active_order_for_table(
+    conn: &Connection,
+    table_id: &str,
+) -> Result<Option<ActiveTableOrderResult>, String> {
+    let mut session_stmt = conn
+        .prepare_cached(
+            "SELECT id, table_id, current_order_id, guest_count, session_status, opened_at, closed_at
+             FROM table_sessions
+             WHERE table_id = ?1 AND session_status IN ('open', 'billed')
+             ORDER BY opened_at DESC;",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let active_sessions: Vec<TableSessionDomain> = session_stmt
+        .query_map(params![table_id], |row| {
+            Ok(TableSessionDomain {
+                id: row.get(0)?,
+                table_id: row.get(1)?,
+                current_order_id: row.get(2)?,
+                guest_count: row.get(3)?,
+                session_status: row.get(4)?,
+                opened_at: row.get(5)?,
+                closed_at: row.get(6)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    if active_sessions.is_empty() {
+        return Ok(None);
+    }
+    if active_sessions.len() > 1 {
+        return Err(format!(
+            "INVARIANT_VIOLATION: Multiple active sessions ({}) found for table {}",
+            active_sessions.len(),
+            table_id
+        ));
+    }
+
+    let session = active_sessions.into_iter().next().unwrap();
+
+    let mut order_stmt = conn
+        .prepare_cached(
+            "SELECT id, display_number, channel, order_type, customer_id, table_session_id,
+                    status, subtotal_paise, tax_total_paise, discount_total_paise,
+                    delivery_charge_paise, grand_total_paise, device_id, version, created_at, updated_at
+             FROM orders
+             WHERE (table_session_id = ?1 OR (id = ?2 AND ?2 IS NOT NULL AND ?2 != ''))
+               AND status NOT IN ('cancelled', 'closed')
+             ORDER BY created_at DESC;",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let curr_order_id = session.current_order_id.clone().unwrap_or_default();
+    let active_orders: Vec<OrderDomain> = order_stmt
+        .query_map(params![session.id, curr_order_id], |row| {
+            Ok(OrderDomain {
+                id: row.get(0)?,
+                display_number: row.get(1)?,
+                channel: row.get(2)?,
+                order_type: row.get(3)?,
+                customer_id: row.get(4)?,
+                table_session_id: row.get(5)?,
+                status: row.get(6)?,
+                subtotal_paise: row.get(7)?,
+                tax_total_paise: row.get(8)?,
+                discount_total_paise: row.get(9)?,
+                delivery_charge_paise: row.get(10)?,
+                grand_total_paise: row.get(11)?,
+                device_id: row.get(12)?,
+                version: row.get(13)?,
+                created_at: row.get(14)?,
+                updated_at: row.get(15)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    if active_orders.is_empty() {
+        return Ok(None);
+    }
+    if active_orders.len() > 1 {
+        return Err(format!(
+            "INVARIANT_VIOLATION: Multiple active orders ({}) found for table session {}",
+            active_orders.len(),
+            session.id
+        ));
+    }
+
+    let order = active_orders.into_iter().next().unwrap();
+
+    let mut item_stmt = conn
+        .prepare_cached(
+            "SELECT id, order_id, product_id, variant_id, product_name,
+                    unit_price_paise, quantity, tax_rate, discount_amount_paise,
+                    line_total_paise, notes, created_at
+             FROM order_items
+             WHERE order_id = ?1
+             ORDER BY created_at ASC, id ASC;",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let items: Vec<OrderItemDomain> = item_stmt
+        .query_map(params![order.id], |row| {
+            Ok(OrderItemDomain {
+                id: row.get(0)?,
+                order_id: row.get(1)?,
+                product_id: row.get(2)?,
+                variant_id: row.get(3)?,
+                product_name: row.get(4)?,
+                unit_price_paise: row.get(5)?,
+                quantity: row.get(6)?,
+                tax_rate: row.get(7)?,
+                discount_amount_paise: row.get(8)?,
+                line_total_paise: row.get(9)?,
+                notes: row.get(10)?,
+                created_at: row.get(11)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    Ok(Some(ActiveTableOrderResult {
+        session,
+        order,
+        items,
+    }))
+}
+
+pub fn get_bill_for_order(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<Option<BillDomain>, String> {
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT id, order_id, bill_number, subtotal_paise, cgst_total_paise,
+                    sgst_total_paise, discount_total_paise, grand_total_paise,
+                    payment_status, finalized_at, device_id
+             FROM bills
+             WHERE order_id = ?1;",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let bill = stmt
+        .query_row(params![order_id], |row| {
+            Ok(BillDomain {
+                id: row.get(0)?,
+                order_id: row.get(1)?,
+                bill_number: row.get(2)?,
+                subtotal_paise: row.get(3)?,
+                cgst_total_paise: row.get(4)?,
+                sgst_total_paise: row.get(5)?,
+                discount_total_paise: row.get(6)?,
+                grand_total_paise: row.get(7)?,
+                payment_status: row.get(8)?,
+                finalized_at: row.get(9)?,
+                device_id: row.get(10)?,
+            })
+        })
+        .optional()
+        .map_err(|e| e.to_string())?;
+
+    Ok(bill)
+}
+
 pub fn execute_query(conn: &Connection, query: NativeQuery) -> Result<serde_json::Value, String> {
     match query {
         NativeQuery::GetDeviceConfig => {
@@ -2093,5 +4086,89 @@ pub fn execute_query(conn: &Connection, query: NativeQuery) -> Result<serde_json
             let cursor = get_sync_cursor(conn, dataset).map_err(|e| e.to_string())?;
             serde_json::to_value(cursor).map_err(|e| e.to_string())
         }
+        NativeQuery::GetTablesWithSessions => {
+            let result = get_tables_with_sessions(conn)?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        NativeQuery::GetCatalog => {
+            let result = get_catalog(conn)?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        NativeQuery::GetActiveOrderForTable { table_id } => {
+            let result = get_active_order_for_table(conn, &table_id)?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        NativeQuery::GetBillForOrder { order_id } => {
+            let result = get_bill_for_order(conn, &order_id)?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
+        NativeQuery::GetKotsForOrder { order_id } => {
+            let result = get_kots_for_order(conn, &order_id)?;
+            serde_json::to_value(result).map_err(|e| e.to_string())
+        }
     }
+}
+
+pub fn get_kots_for_order(
+    conn: &Connection,
+    order_id: &str,
+) -> Result<Vec<OrderKotHeaderWithItems>, String> {
+    let mut kot_stmt = conn
+        .prepare(
+            "SELECT id, order_id, kot_number, device_id, status, printed_at
+             FROM pos_kots
+             WHERE order_id = ?
+             ORDER BY kot_number ASC, id ASC;",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let kot_rows = kot_stmt
+        .query_map(params![order_id], |r| {
+            Ok(PosKotDomain {
+                id: r.get(0)?,
+                order_id: r.get(1)?,
+                kot_number: r.get(2)?,
+                device_id: r.get(3)?,
+                status: r.get(4)?,
+                printed_at: r.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut item_stmt = conn
+        .prepare(
+            "SELECT id, kot_id, order_item_id, product_id, variant_id, product_name, quantity, notes
+             FROM kot_items
+             WHERE kot_id = ?
+             ORDER BY id ASC;",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let mut result = Vec::new();
+    for kot_res in kot_rows {
+        let kot = kot_res.map_err(|e| e.to_string())?;
+        let item_rows = item_stmt
+            .query_map(params![kot.id], |r| {
+                Ok(KotItemDomain {
+                    id: r.get(0)?,
+                    kot_id: r.get(1)?,
+                    order_item_id: r.get(2)?,
+                    product_id: r.get(3)?,
+                    variant_id: r.get(4)?,
+                    product_name: r.get(5)?,
+                    quantity: r.get(6)?,
+                    notes: r.get(7)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut items = Vec::new();
+        for item_res in item_rows {
+            items.push(item_res.map_err(|e| e.to_string())?);
+        }
+
+        result.push(OrderKotHeaderWithItems { kot, items });
+    }
+
+    Ok(result)
 }
