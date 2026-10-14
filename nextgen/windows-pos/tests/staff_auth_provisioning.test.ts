@@ -21,6 +21,7 @@ import {
   signOutStaff,
   getStaffAuthSession,
   isStaffAuthSessionReady,
+  getSyncOrchestratorSingleton,
 } from '../src/bootstrap.js';
 import {
   nativeProvisionDevice,
@@ -59,7 +60,17 @@ function createMockSupabaseClient(options?: {
       signOut: async () => ({ error: null }),
     },
     from: (table: string) => {
-      assert.equal(table, 'staff_profiles');
+      if (table !== 'staff_profiles') {
+        const queryChain: any = {
+          select: () => queryChain,
+          or: () => queryChain,
+          order: () => queryChain,
+          limit: async () => ({ data: [], error: null }),
+          in: () => queryChain,
+          range: async () => ({ data: [], error: null }),
+        };
+        return queryChain;
+      }
       return {
         select: (_cols: string) => ({
           eq: (field: string, val: string) => ({
@@ -338,6 +349,90 @@ describe('CHEESYOS NEXTGEN WINDOWS POS — STAFF AUTH & DEVICE PROVISIONING (TAS
     assert.equal(result.errorCode, 'STAFF_PROFILE_NOT_FOUND');
     assert.equal(result.errorMessage, 'Staff profile record not found for this account.');
     assert.equal(isStaffAuthSessionReady(), false);
+  });
+
+  it('11. SIGN_IN_STARTUP_SYNC_TRIGGER: Successful staff sign-in triggers startup sync on auth false->true transition', async () => {
+    const mockClient = createMockSupabaseClient();
+    await bootstrapPosHost({ supabaseClient: mockClient });
+
+    const orchestrator = getSyncOrchestratorSingleton();
+    assert.ok(orchestrator, 'Orchestrator singleton must be initialized');
+
+    let startupSyncCalls = 0;
+    const origStartupSync = orchestrator.requestStartupSync.bind(orchestrator);
+    orchestrator.requestStartupSync = async () => {
+      startupSyncCalls++;
+      return origStartupSync();
+    };
+
+    const result = await signInStaff('admin@cheesybites.in', 'Secret123!');
+    assert.equal(result.success, true);
+    assert.equal(startupSyncCalls, 1, 'SIGN_IN_STARTUP_SYNC_TRIGGER: Exactly 1 startup sync must be triggered on auth false->true transition');
+  });
+
+  it('12. FAILED_OR_UNAUTHORIZED_SIGN_IN_DOES_NOT_TRIGGER_STARTUP_SYNC: Failed login or inactive staff does not trigger startup sync', async () => {
+    // 1. Failed credentials
+    const badCredsClient = createMockSupabaseClient({
+      authError: { message: 'Invalid credentials' },
+    });
+    await bootstrapPosHost({ supabaseClient: badCredsClient });
+    const orchestrator1 = getSyncOrchestratorSingleton()!;
+    let calls1 = 0;
+    orchestrator1.requestStartupSync = async () => {
+      calls1++;
+      return { pushResult: { status: 'COMPLETED', pushedRecordsCount: 0 } as any };
+    };
+
+    const failRes = await signInStaff('admin@cheesybites.in', 'WrongPassword');
+    assert.equal(failRes.success, false);
+    assert.equal(calls1, 0, 'Failed credentials must not trigger startup sync');
+
+    disposePosHost();
+
+    // 2. Inactive profile
+    const inactiveClient = createMockSupabaseClient({
+      profile: {
+        id: 'usr-admin-1',
+        full_name: 'Store Owner',
+        role: 'owner',
+        has_pos_access: true,
+        has_admin_access: true,
+        is_active: false,
+      },
+    });
+    await bootstrapPosHost({ supabaseClient: inactiveClient });
+    const orchestrator2 = getSyncOrchestratorSingleton()!;
+    let calls2 = 0;
+    orchestrator2.requestStartupSync = async () => {
+      calls2++;
+      return { pushResult: { status: 'COMPLETED', pushedRecordsCount: 0 } as any };
+    };
+
+    const inactiveRes = await signInStaff('admin@cheesybites.in', 'Secret123!');
+    assert.equal(inactiveRes.success, false);
+    assert.equal(calls2, 0, 'Inactive profile must not trigger startup sync');
+  });
+
+  it('13. DUPLICATE_SIGN_IN_DOES_NOT_DUPLICATE_STARTUP_SYNC: Repeated sign-in without transition does not trigger duplicate sync', async () => {
+    const mockClient = createMockSupabaseClient();
+    await bootstrapPosHost({ supabaseClient: mockClient });
+
+    const orchestrator = getSyncOrchestratorSingleton()!;
+    let startupSyncCalls = 0;
+    orchestrator.requestStartupSync = async () => {
+      startupSyncCalls++;
+      return { pushResult: { status: 'COMPLETED', pushedRecordsCount: 0 } as any };
+    };
+
+    // First login: false -> true
+    const res1 = await signInStaff('admin@cheesybites.in', 'Secret123!');
+    assert.equal(res1.success, true);
+    assert.equal(startupSyncCalls, 1, 'First login must trigger startup sync');
+
+    // Second login while already ready: true -> true
+    const res2 = await signInStaff('admin@cheesybites.in', 'Secret123!');
+    assert.equal(res2.success, true);
+    assert.equal(startupSyncCalls, 1, 'Repeated login without transition must not duplicate startup sync');
   });
 });
 

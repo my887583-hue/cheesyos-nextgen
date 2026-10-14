@@ -67,6 +67,7 @@ let orchestratorInstance: SyncRuntimeOrchestrator | null = null;
 let lifecycleInstance: WindowsPosLifecycleManager | null = null;
 let supabaseClientInstance: ReturnType<typeof createNextGenSupabaseClient> | null = null;
 let activeStaffSession: StaffAuthSession | null = null;
+let lifecycleAuthReady = false;
 
 export function getLocalDbSingleton(): IPosPersistence | null {
   return dbInstance;
@@ -181,7 +182,11 @@ export async function signInStaff(email: string, password: string): Promise<Staf
     activeStaffSession = session;
 
     if (lifecycleInstance) {
-      await lifecycleInstance.setAuthSessionReady(isStaffAuthSessionReady());
+      const nextReady = isStaffAuthSessionReady();
+      await lifecycleInstance.setAuthSessionReady(nextReady).catch((err) => {
+        console.warn('[signInStaff] Startup sync encountered error:', err);
+      });
+      lifecycleAuthReady = nextReady;
     }
 
     return {
@@ -201,6 +206,7 @@ export async function signOutStaff(): Promise<void> {
   activeStaffSession = null;
   if (lifecycleInstance) {
     await lifecycleInstance.setAuthSessionReady(false);
+    lifecycleAuthReady = false;
   }
   if (supabaseClientInstance) {
     await supabaseClientInstance.auth.signOut().catch(() => {});
@@ -209,6 +215,7 @@ export async function signOutStaff(): Promise<void> {
 
 export function disposePosHost(): void {
   activeStaffSession = null;
+  lifecycleAuthReady = false;
   if (lifecycleInstance) {
     lifecycleInstance.dispose();
     lifecycleInstance = null;
@@ -294,10 +301,11 @@ export async function bootstrapPosHost(options?: BootstrapPosHostOptions): Promi
   if (dbInstance && orchestratorInstance) {
     try {
       if (!lifecycleInstance) {
+        lifecycleAuthReady = isStaffAuthSessionReady();
         lifecycleInstance = new WindowsPosLifecycleManager({
           persistence: dbInstance,
           orchestrator: orchestratorInstance,
-          isAuthSessionReady: () => isStaffAuthSessionReady(),
+          isAuthSessionReady: () => lifecycleAuthReady,
         });
         lifecycleInstance.start();
       }
